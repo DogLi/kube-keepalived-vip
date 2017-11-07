@@ -14,10 +14,10 @@ controller: clean
 	${PKG}/pkg/cmd
 
 container:
-	docker build -t $(PREFIX):$(TAG) rootfs
+	sudo docker build -t $(PREFIX):$(TAG) rootfs
 
 push: container
-	docker push $(PREFIX):$(TAG)
+	sudo docker push $(PREFIX):$(TAG)
 
 clean:
 	rm -f rootfs/kube-keepalived-vip
