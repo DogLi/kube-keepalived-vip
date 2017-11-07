@@ -8,9 +8,10 @@ spec:
       labels:
         name: kube-keepalived-vip
     spec:
+      serviceAccountName: keepalived-vip
       hostNetwork: true
       containers:
-        - image: aledbf/kube-keepalived-vip:0.23
+        - image: 10.10.20.3:5000/ylf/kube-keepalived-vip:0.23
           name: kube-keepalived-vip
           imagePullPolicy: Always
           securityContext:
@@ -18,7 +19,7 @@ spec:
           volumeMounts:
             - mountPath: /lib/modules
               name: modules
-              readOnly: true
+              readOnly: false
             - mountPath: /dev
               name: dev
           # use downward API
@@ -32,6 +33,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           # to use unicast
+          command: ["/kube-keepalived-vip"]
           args:
           - --services-configmap=default/vip-configmap
           # unicast uses the ip of the nodes instead of multicast

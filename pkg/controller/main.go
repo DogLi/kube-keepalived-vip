@@ -354,6 +354,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	}
 
 	pod, err := kubeClient.Pods(podInfo.Namespace).Get(podInfo.Name, metav1.GetOptions{})
+
 	if err != nil {
 		glog.Fatalf("Error getting %v: %v", podInfo.Name, err)
 	}
