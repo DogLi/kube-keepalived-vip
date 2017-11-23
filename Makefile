@@ -1,7 +1,7 @@
 all: push
 
 # 0.0 shouldn't clobber any release builds
-TAG = 0.23
+TAG = 0.1
 PREFIX = 10.10.20.3:5000/ylf/kube-keepalived-vip
 BUILD_IMAGE = build-keepalived
 PKG = github.com/aledbf/kube-keepalived-vip
@@ -13,7 +13,14 @@ controller: clean
 	-o rootfs/kube-keepalived-vip \
 	${PKG}/pkg/cmd
 
-container:
+.PHONY: build
+build:
+	sudo docker run -it \
+    -v /root/kube-keepalived-vip\:/root/database-operator/src/github.com/aledbf/kube-keepalived-vip \
+    10.10.20.3\:5000/ylf/golang \
+    /bin/bash -c "cd /root/database-operator/src/github.com/aledbf/kube-keepalived-vip && make controller"
+
+container: build
 	sudo docker build -t $(PREFIX):$(TAG) rootfs
 
 push: container
