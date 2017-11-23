@@ -212,7 +212,7 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 	}
 
 	if !svcExists {
-		glog.Warningf("service %v not found", nsSvc)
+		glog.Warningf("service %v/%v not found", ns, svc)
 		return nil, fmt.Errorf("service %v not found")
 	}
 
@@ -255,16 +255,20 @@ func (ipvsc *ipvsControllerController) getServices() []vip {
 	return svcs
 }
 
-func (ipvsc *ipvsControllerController) sync(key interface{}) error {
+func (ipvsc *ipvsControllerController) freshKeepalivedConf() error {
 	// get all svcs and restart keepalived
 	keepaliveMutex.Lock()
 	defer keepaliveMutex.Unlock()
 	ipvsc.keepalived.VIPs = ipvsc.getServices()
 	err := ipvsc.keepalived.WriteCfg()
-	if err != nil {
-		return err
+	return err
+}
+
+func (ipvsc *ipvsControllerController) sync(key interface{}) error {
+	err := ipvsc.freshKeepalivedConf()
+	if err == nil {
+		err = ipvsc.reload()
 	}
-	err = ipvsc.reload()
 	return err
 }
 
@@ -387,6 +391,9 @@ func (ipvsc *ipvsControllerController) Start() {
 	}
 
 	glog.Info("starting keepalived to announce VIPs")
+	//err := ipvsc.freshKeepalivedConf()
+	//if err == nil {
+	//}
 	ipvsc.keepalived.Start()
 }
 

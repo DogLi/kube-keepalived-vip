@@ -27,6 +27,7 @@ import (
 
 	"github.com/golang/glog"
 
+	"bytes"
 	"k8s.io/kubernetes/pkg/util/iptables"
 	k8sexec "k8s.io/utils/exec"
 	"sort"
@@ -70,11 +71,11 @@ func (k *keepalived) WriteCfg() error {
 	if err != nil {
 		return err
 	}
-	defer w.Close()
 
 	VIPs := k.VIPs
 	sort.Sort(vipByNameIPPort(VIPs))
 	vips := k.getVIPs()
+	defer w.Close()
 
 	conf := make(map[string]interface{})
 	conf["iptablesChain"] = iptablesChain
@@ -95,10 +96,17 @@ func (k *keepalived) WriteCfg() error {
 		glog.Infof("%v", string(b))
 	}
 
-	err = k.keepalivedTmpl.Execute(w, conf)
-	if err != nil {
-		return fmt.Errorf("unexpected error creating keepalived.cfg: %v", err)
+	if err = k.keepalivedTmpl.Execute(w, conf); err != nil {
+		glog.Infof("error to generate keepalived config: %s", keepalivedCfg)
+		return err
 	}
+
+	// TODO: just for debug
+	var buffer bytes.Buffer
+	k.keepalivedTmpl.Execute(&buffer, conf)
+	content := buffer.String()
+	glog.Infof("XXXXXXXXXXXXX:   %s", VIPs)
+	glog.Infof("============:\n%s", content)
 
 	if k.proxyMode {
 		w, err := os.Create(haproxyCfg)
