@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sync"
 	"syscall"
 	"text/template"
 
@@ -28,6 +29,7 @@ import (
 
 	"k8s.io/kubernetes/pkg/util/iptables"
 	k8sexec "k8s.io/utils/exec"
+	"sort"
 )
 
 const (
@@ -35,6 +37,8 @@ const (
 	keepalivedCfg = "/etc/keepalived/keepalived.conf"
 	haproxyCfg    = "/etc/haproxy/haproxy.cfg"
 )
+
+var keepaliveMutex sync.Mutex
 
 var (
 	keepalivedTmpl = "keepalived.tmpl"
@@ -50,7 +54,7 @@ type keepalived struct {
 	neighbors      []string
 	useUnicast     bool
 	started        bool
-	vips           []string
+	VIPs           []vip
 	keepalivedTmpl *template.Template
 	haproxyTmpl    *template.Template
 	cmd            *exec.Cmd
@@ -61,28 +65,30 @@ type keepalived struct {
 
 // WriteCfg creates a new keepalived configuration file.
 // In case of an error with the generation it returns the error
-func (k *keepalived) WriteCfg(svcs []vip) error {
+func (k *keepalived) WriteCfg() error {
 	w, err := os.Create(keepalivedCfg)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
 
-	k.vips = getVIPs(svcs)
+	VIPs := k.VIPs
+	sort.Sort(vipByNameIPPort(VIPs))
+	vips := k.getVIPs()
 
 	conf := make(map[string]interface{})
 	conf["iptablesChain"] = iptablesChain
 	conf["iface"] = k.iface
 	conf["myIP"] = k.ip
 	conf["netmask"] = k.netmask
-	conf["svcs"] = svcs
-	conf["vips"] = getVIPs(svcs)
+	conf["svcs"] = VIPs
+	conf["vips"] = vips
 	conf["nodes"] = k.neighbors
 	conf["priority"] = k.priority
 	conf["useUnicast"] = k.useUnicast
 	conf["vrid"] = k.vrid
 	conf["proxyMode"] = k.proxyMode
-	conf["vipIsEmpty"] = len(k.vips) == 0
+	conf["vipIsEmpty"] = len(vips) == 0
 
 	if glog.V(2) {
 		b, _ := json.Marshal(conf)
@@ -109,15 +115,20 @@ func (k *keepalived) WriteCfg(svcs []vip) error {
 	return nil
 }
 
-// getVIPs returns a list of the virtual IP addresses to be used in keepalived
-// without duplicates (a service can use more than one port)
-func getVIPs(svcs []vip) []string {
+func (k *keepalived) getVIPs() []string {
 	result := []string{}
-	for _, svc := range svcs {
-		result = appendIfMissing(result, svc.IP)
+	for _, VIP := range k.VIPs {
+		result = appendIfMissing(result, VIP.IP)
 	}
-
 	return result
+}
+func (k *keepalived) resetIPVS() error {
+	glog.Info("cleaning ipvs configuration")
+	_, err := k8sexec.New().Command("ipvsadm", "-C").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("error removing ipvs configuration: %v", err)
+	}
+	return nil
 }
 
 // Start starts a keepalived process in foreground.
@@ -172,9 +183,10 @@ func (k *keepalived) Reload() error {
 	return nil
 }
 
-// Stop stop keepalived process
+// Stop keepalived process
 func (k *keepalived) Stop() {
-	for _, vip := range k.vips {
+	vips := k.getVIPs()
+	for _, vip := range vips {
 		k.removeVIP(vip)
 	}
 
@@ -192,10 +204,54 @@ func (k *keepalived) Stop() {
 func (k *keepalived) removeVIP(vip string) error {
 	glog.Infof("removing configured VIP %v", vip)
 	out, err := k8sexec.New().Command("ip", "addr", "del", vip+"/32", "dev", k.iface).CombinedOutput()
+	if string(out) == "RTNETLINK answers: Cannot assign requested address" {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("error reloading keepalived: %v\n%s", err, out)
 	}
 	return nil
+}
+
+// DeleteVIP removes a VIP from the keepalived config
+func (k *keepalived) DeleteVIP(v string) error {
+	newVIP := []vip{}
+	find := false
+	glog.Infof("Deleing VIP %v", v)
+	for index, VIP := range k.VIPs {
+		if VIP.IP == v {
+			find = true
+			newVIP = append(k.VIPs[:index], k.VIPs[index+1:]...)
+			err := k.removeVIP(v)
+			if err != nil {
+				return err
+			}
+			k.VIPs = newVIP
+		}
+	}
+	if find == false {
+		glog.Errorf("VIP %v had not been added.", v)
+		return nil
+	}
+	err := k.WriteCfg()
+	return err
+}
+
+// AddVIP removes a VIP from the keepalived config
+func (k *keepalived) AddVIPs(bindIP string, VIPs []vip) error {
+	keepaliveMutex.Lock()
+	defer keepaliveMutex.Unlock()
+	// delete the old VIP first
+	for index, V := range k.VIPs {
+		if V.IP == bindIP {
+			k.VIPs = append(k.VIPs[:index], k.VIPs[index+1:]...)
+		}
+	}
+
+	// add the new VIPs
+	k.VIPs = append(k.VIPs, VIPs...)
+	err := k.WriteCfg()
+	return err
 }
 
 func (k *keepalived) loadTemplates() error {

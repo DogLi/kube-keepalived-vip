@@ -76,6 +76,9 @@ var (
 		`The keepalived VRID (Virtual Router Identifier, between 0 and 255 as per 
       RFC-5798), which must be different for every Virtual Router (ie. every 
       keepalived sets) running on the same network.`)
+
+	configLabelKey   = flags.String("labelKey", "loadbalancer", "watch the configmap with label configLabelKey: configLabelValue")
+	configLabelValue = flag.String("labelValue", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
 )
 
 func main() {
@@ -125,7 +128,8 @@ func main() {
 	}
 
 	glog.Info("starting LVS configuration")
-	ipvsc := controller.NewIPVSController(kubeClient, *watchNamespace, *useUnicast, *configMapName, *vrid, *proxyMode)
+
+	ipvsc := controller.NewIPVSController(kubeClient, *watchNamespace, *useUnicast, *configMapName, *configLabelKey, *configLabelValue, *vrid, *proxyMode)
 
 	ipvsc.Start()
 }

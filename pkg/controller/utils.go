@@ -48,7 +48,7 @@ type nodeInfo struct {
 }
 
 // getNetworkInfo returns information of the node where the pod is running
-func getNetworkInfo(ip string) (*nodeInfo, error) {
+func getNodeNetworkInfo(ip string) (*nodeInfo, error) {
 	iface, _, mask := interfaceByIP(ip)
 	return &nodeInfo{
 		iface:   iface,

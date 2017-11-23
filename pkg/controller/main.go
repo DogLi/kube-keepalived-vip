@@ -24,7 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"reflect"
-	"sort"
+	//"sort"
 	"sync"
 	"syscall"
 	"time"
@@ -32,10 +32,11 @@ import (
 	"github.com/golang/glog"
 
 	apiv1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/runtime"
+	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/flowcontrol"
@@ -47,6 +48,11 @@ import (
 	"github.com/aledbf/kube-keepalived-vip/pkg/k8s"
 	"github.com/aledbf/kube-keepalived-vip/pkg/store"
 	"github.com/aledbf/kube-keepalived-vip/pkg/task"
+	//"github.com/aledbf/kube-keepalived-vip/utils"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	"sort"
 )
 
 const (
@@ -57,6 +63,8 @@ type service struct {
 	IP   string
 	Port int
 }
+
+var configMapMutex sync.Mutex
 
 type serviceByIPPort []service
 
@@ -119,8 +127,7 @@ type ipvsControllerController struct {
 	mapLister store.ConfigMapLister
 
 	reloadRateLimiter flowcontrol.RateLimiter
-
-	keepalived *keepalived
+	keepalived        *keepalived
 
 	configMapName string
 
@@ -133,9 +140,11 @@ type ipvsControllerController struct {
 
 	shutdown bool
 
-	syncQueue *task.Queue
+	syncQueue    *task.Queue
+	cfmsyncQueue *task.Queue
 
-	stopCh chan struct{}
+	stopCh    chan struct{}
+	stopCfgCh chan struct{}
 }
 
 // getEndpoints returns a list of <endpoint ip>:<port> for a given service/target port combination.
@@ -178,96 +187,102 @@ func (ipvsc *ipvsControllerController) getEndpoints(
 }
 
 // getServices returns a list of services and their endpoints.
-func (ipvsc *ipvsControllerController) getServices(cfgMap *apiv1.ConfigMap) []vip {
+func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, error) {
 	svcs := []vip{}
 
-	// k -> IP to use
-	// v -> <namespace>/<service name>:<lvs method>
-	for externalIP, nsSvcLvs := range cfgMap.Data {
-		if nsSvcLvs == "" {
-			// if target is empty string we will not forward to any service but
-			// instead just configure the IP on the machine and let it up to
-			// another Pod or daemon to bind to the IP address
-			svcs = append(svcs, vip{
-				Name:      "",
-				IP:        externalIP,
-				Port:      0,
-				LVSMethod: "VIP",
-				Backends:  nil,
-				Protocol:  "TCP",
-			})
-			glog.V(2).Infof("Adding VIP only service: %v", externalIP)
-			continue
-		}
-
-		ns, svc, lvsm, err := parseNsSvcLVS(nsSvcLvs)
-		if err != nil {
-			glog.Warningf("%v", err)
-			continue
-		}
-
-		nsSvc := fmt.Sprintf("%v/%v", ns, svc)
-		svcObj, svcExists, err := ipvsc.svcLister.Store.GetByKey(nsSvc)
-		if err != nil {
-			glog.Warningf("error getting service %v: %v", nsSvc, err)
-			continue
-		}
-
-		if !svcExists {
-			glog.Warningf("service %v not found", nsSvc)
-			continue
-		}
-
-		s := svcObj.(*apiv1.Service)
-		for _, servicePort := range s.Spec.Ports {
-			ep := ipvsc.getEndpoints(s, &servicePort)
-			if len(ep) == 0 {
-				glog.Warningf("no endpoints found for service %v, port %+v", s.Name, servicePort)
-				continue
-			}
-
-			sort.Sort(serviceByIPPort(ep))
-
-			svcs = append(svcs, vip{
-				Name:      fmt.Sprintf("%v-%v", s.Namespace, s.Name),
-				IP:        externalIP,
-				Port:      int(servicePort.Port),
-				LVSMethod: lvsm,
-				Backends:  ep,
-				Protocol:  fmt.Sprintf("%v", servicePort.Protocol),
-			})
-			glog.V(2).Infof("found service: %v:%v", s.Name, servicePort.Port)
-		}
+	cmData := cm.Data
+	bind_ip := cmData["bind_ip"]
+	svc := cmData["target_svc"]
+	ns, ok := cmData["target_namespace"]
+	if !ok {
+		ns = "default"
+		cm.Data["target_namespace"] = ns
+	}
+	kind, ok := cmData["kind"] // ["NAT", "DR", "PROXY"]
+	if !ok {
+		kind = "NAT"
+		cm.Data["kind"] = "NAT"
 	}
 
-	sort.Sort(vipByNameIPPort(svcs))
+	nsSvc := fmt.Sprintf("%v/%v", ns, svc)
+	svcObj, svcExists, err := ipvsc.svcLister.Store.GetByKey(nsSvc)
+	if err != nil {
+		glog.Warningf("error getting service %v: %v", nsSvc, err)
+		return nil, err
+	}
 
+	if !svcExists {
+		glog.Warningf("service %v not found", nsSvc)
+		return nil, fmt.Errorf("service %v not found")
+	}
+
+	s := svcObj.(*apiv1.Service)
+	for _, servicePort := range s.Spec.Ports {
+		ep := ipvsc.getEndpoints(s, &servicePort)
+		if len(ep) == 0 {
+			glog.Warningf("no endpoints found for service %v, port %+v", s.Name, servicePort)
+			continue
+		}
+
+		sort.Sort(serviceByIPPort(ep))
+
+		svcs = append(svcs, vip{
+			Name:      fmt.Sprintf("%v-%v", s.Namespace, s.Name),
+			IP:        bind_ip,
+			Port:      int(servicePort.Port),
+			LVSMethod: kind,
+			Backends:  ep,
+			Protocol:  fmt.Sprintf("%v", servicePort.Protocol),
+		})
+		glog.V(2).Infof("found service: %v:%v", s.Name, servicePort.Port)
+	}
+	sort.Sort(vipByNameIPPort(svcs))
+	return svcs, nil
+}
+
+func (ipvsc *ipvsControllerController) getServices() []vip {
+	configmaps := ipvsc.getConfigMaps()
+	svcs := []vip{}
+	for _, configmap := range configmaps {
+		svc, err := ipvsc.getService(configmap)
+		if err != nil {
+			glog.Warningf("can not get service info from configmap %s", configmap.Name)
+			continue
+		}
+		svcs = append(svcs, svc...)
+	}
+	sort.Sort(vipByNameIPPort(svcs))
 	return svcs
 }
 
-// sync all services with the
 func (ipvsc *ipvsControllerController) sync(key interface{}) error {
-	ipvsc.reloadRateLimiter.Accept()
-
-	ns, name, err := parseNsName(ipvsc.configMapName)
-	if err != nil {
-		glog.Warningf("%v", err)
-		return err
-	}
-	cfgMap, err := ipvsc.getConfigMap(ns, name)
-	if err != nil {
-		return fmt.Errorf("unexpected error searching configmap %v: %v", ipvsc.configMapName, err)
-	}
-
-	svc := ipvsc.getServices(cfgMap)
-
-	err = ipvsc.keepalived.WriteCfg(svc)
+	// get all svcs and restart keepalived
+	keepaliveMutex.Lock()
+	defer keepaliveMutex.Unlock()
+	ipvsc.keepalived.VIPs = ipvsc.getServices()
+	err := ipvsc.keepalived.WriteCfg()
 	if err != nil {
 		return err
 	}
+	err = ipvsc.reload()
+	return err
+}
 
-	glog.V(2).Infof("services: %v", svc)
+func acquire_vip() (string, error) {
+	// TODO: get vip from zstack
+	return "10.10.40.44", nil
+}
 
+func restore_vip(vip string) error {
+	// TODO: return vip to zstack
+	return nil
+}
+
+func (ipvsc *ipvsControllerController) processCfmSyncError(key interface{}) {
+	ipvsc.cfmsyncQueue.Enqueue(key)
+}
+
+func (ipvsc *ipvsControllerController) reload() error {
 	md5, err := checksum(keepalivedCfg)
 	if err == nil && md5 == ipvsc.ruMD5 {
 		return nil
@@ -275,10 +290,79 @@ func (ipvsc *ipvsControllerController) sync(key interface{}) error {
 
 	ipvsc.ruMD5 = md5
 	err = ipvsc.keepalived.Reload()
+	return err
+}
+
+func (ipvsc *ipvsControllerController) sync_cfm(oldkey interface{}) error {
+	keepaliveMutex.Lock()
+	defer keepaliveMutex.Unlock()
+	ipvsc.reloadRateLimiter.Accept()
+
+	oldCM := oldkey.(*apiv1.ConfigMap)
+	cmName := oldCM.GetObjectMeta().GetName()
+	cmNamespace := oldCM.GetObjectMeta().GetNamespace()
+	cmData := oldCM.Data
+	_, err := ipvsc.getConfigMap(cmNamespace, cmName)
+	glog.Infof("in sync configmap %s, data: %s", oldCM.Name, cmData)
+	// on delete configmap
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			err = ipvsc.OnDeleteConfigmap(oldCM)
+		}
+		if err != nil {
+			ipvsc.processCfmSyncError(oldkey)
+		}
+		return err
+	}
+
+	// on create configmap, bind_ip is not set
+	err = ipvsc.OnSyncConfigmap(oldCM)
+	if err != nil {
+		ipvsc.processCfmSyncError(oldkey)
+	}
+	return err
+}
+
+func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) error {
+	cmData := cfm.Data
+	svc := cmData["target_service"]
+	_, ok := cmData["bind_ip"]
+	if !ok {
+		bindIp, err := acquire_vip()
+		if err != nil {
+			glog.Errorf("acquire vip failed for service %s", svc)
+			return fmt.Errorf("error when acquire vip: %s", err)
+		}
+		cfm.Data["bind_ip"] = bindIp
+		return nil
+	}
+
+	// reload
+	bindIP := cfm.Data["bind_ip"]
+	VIPs, err := ipvsc.getService(cfm)
+	err = ipvsc.keepalived.AddVIPs(bindIP, VIPs)
 	if err != nil {
 		glog.Errorf("error reloading keepalived: %v", err)
 	}
+	ipvsc.reload()
+	return nil
+}
 
+func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) error {
+	cmData := cfm.Data
+	vip, ok := cmData["bind_ip"]
+	if ok {
+		err := ipvsc.keepalived.DeleteVIP(vip)
+		if err != nil {
+			return err
+		}
+		err = restore_vip(vip)
+		if err != nil {
+			glog.Errorf("error to restore vip: %s", vip)
+		}
+		err = ipvsc.keepalived.Reload()
+		return err
+	}
 	return nil
 }
 
@@ -288,6 +372,7 @@ func (ipvsc *ipvsControllerController) Start() {
 	go ipvsc.svcController.Run(ipvsc.stopCh)
 	go ipvsc.mapController.Run(ipvsc.stopCh)
 
+	go ipvsc.cfmsyncQueue.Run(time.Second, ipvsc.stopCfgCh)
 	go ipvsc.syncQueue.Run(time.Second, ipvsc.stopCh)
 
 	go handleSigterm(ipvsc)
@@ -298,7 +383,7 @@ func (ipvsc *ipvsControllerController) Start() {
 		ipvsc.svcController.HasSynced,
 		ipvsc.mapController.HasSynced,
 	) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 	}
 
 	glog.Info("starting keepalived to announce VIPs")
@@ -330,6 +415,7 @@ func (ipvsc *ipvsControllerController) Stop() error {
 		glog.Infof("shutting down controller queues")
 		close(ipvsc.stopCh)
 		go ipvsc.syncQueue.Shutdown()
+		go ipvsc.cfmsyncQueue.Shutdown()
 
 		ipvsc.keepalived.Stop()
 
@@ -340,11 +426,10 @@ func (ipvsc *ipvsControllerController) Stop() error {
 }
 
 // NewIPVSController creates a new controller from the given config.
-func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, configMapName string, vrid int, proxyMode bool) *ipvsControllerController {
+func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, configMapName, labelKey, labelValue string, vrid int, proxyMode bool) *ipvsControllerController {
 	ipvsc := ipvsControllerController{
 		client:            kubeClient,
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
-		configMapName:     configMapName,
 		stopCh:            make(chan struct{}),
 	}
 
@@ -360,32 +445,33 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	}
 
 	selector := parseNodeSelector(pod.Spec.NodeSelector)
-	clusterNodes := getClusterNodesIP(kubeClient, selector)
+	clusterNodesIP := getClusterNodesIP(kubeClient, selector)
 
-	nodeInfo, err := getNetworkInfo(podInfo.NodeIP)
+	nodeNetInfo, err := getNodeNetworkInfo(podInfo.NodeIP)
 	if err != nil {
 		glog.Fatalf("Error getting local IP from nodes in the cluster: %v", err)
 	}
 
-	neighbors := getNodeNeighbors(nodeInfo, clusterNodes)
+	neighbors := getNodeNeighbors(nodeNetInfo, clusterNodesIP)
 
 	execer := utilexec.New()
 	dbus := utildbus.New()
 	iptInterface := utiliptables.New(execer, dbus, utiliptables.ProtocolIpv4)
 
 	ipvsc.keepalived = &keepalived{
-		iface:      nodeInfo.iface,
-		ip:         nodeInfo.ip,
-		netmask:    nodeInfo.netmask,
-		nodes:      clusterNodes,
+		iface:      nodeNetInfo.iface,
+		ip:         nodeNetInfo.ip,
+		netmask:    nodeNetInfo.netmask,
+		nodes:      clusterNodesIP,
 		neighbors:  neighbors,
-		priority:   getNodePriority(nodeInfo.ip, clusterNodes),
+		priority:   getNodePriority(nodeNetInfo.ip, clusterNodesIP),
 		useUnicast: useUnicast,
 		ipt:        iptInterface,
 		vrid:       vrid,
 		proxyMode:  proxyMode,
 	}
 
+	ipvsc.cfmsyncQueue = task.NewTaskQueue(ipvsc.sync_cfm)
 	ipvsc.syncQueue = task.NewTaskQueue(ipvsc.sync)
 
 	err = ipvsc.keepalived.loadTemplates()
@@ -394,14 +480,20 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	}
 
 	mapEventHandler := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			ipvsc.syncQueue.Enqueue(obj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			ipvsc.syncQueue.Enqueue(obj)
+		},
 		UpdateFunc: func(old, cur interface{}) {
 			if !reflect.DeepEqual(old, cur) {
-				upCmap := cur.(*apiv1.ConfigMap)
-				mapKey := fmt.Sprintf("%s/%s", upCmap.Namespace, upCmap.Name)
-				// updates to configuration configmaps can trigger an update
-				if mapKey == ipvsc.configMapName {
-					ipvsc.syncQueue.Enqueue(cur)
-				}
+				oldCM := old.(*apiv1.ConfigMap)
+				curCM := cur.(*apiv1.ConfigMap)
+				configMapMutex.Lock()
+				defer configMapMutex.Unlock()
+				curCM.Data = oldCM.Data
+				return
 			}
 		},
 	}
@@ -429,21 +521,44 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		&apiv1.Endpoints{}, resyncPeriod, eventHandlers)
 
 	ipvsc.mapLister.Store, ipvsc.mapController = cache.NewInformer(
-		cache.NewListWatchFromClient(ipvsc.client.CoreV1().RESTClient(), "configmaps", namespace, fields.Everything()),
+		&cache.ListWatch{
+			ListFunc:  configMapListFunc(kubeClient, namespace, labelKey, labelValue),
+			WatchFunc: configMapWatchFunc(kubeClient, namespace, labelKey, labelValue),
+		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler)
 
 	return &ipvsc
 }
 
+func configMapListFunc(c *kubernetes.Clientset, ns string, labelKey, labelValue string) func(metav1.ListOptions) (runtime.Object, error) {
+	return func(options metav1.ListOptions) (runtime.Object, error) {
+		options.LabelSelector = labels.Set{labelKey: labelValue}.AsSelector().String()
+		return c.ConfigMaps(ns).List(options)
+	}
+}
+
+func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelKey, labelValue string) func(options metav1.ListOptions) (watch.Interface, error) {
+	return func(options metav1.ListOptions) (watch.Interface, error) {
+		options.LabelSelector = labels.Set{labelKey: labelValue}.AsSelector().String()
+		return c.ConfigMaps(ns).Watch(options)
+	}
+}
+
 func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.ConfigMap, error) {
 	s, exists, err := ipvsc.mapLister.Store.GetByKey(fmt.Sprintf("%v/%v", ns, name))
-	if err != nil {
+	if err != nil || !exists {
 		return nil, err
 	}
-	if !exists {
-		return nil, fmt.Errorf("configmap %v was not found", name)
-	}
 	return s.(*apiv1.ConfigMap), nil
+}
+
+func (ipvsc *ipvsControllerController) getConfigMaps() []*apiv1.ConfigMap {
+	objs := ipvsc.mapLister.Store.List()
+	configmaps := []*apiv1.ConfigMap{}
+	for _, obj := range objs {
+		configmaps = append(configmaps, obj.(*apiv1.ConfigMap))
+	}
+	return configmaps
 }
 
 func checksum(filename string) (string, error) {
