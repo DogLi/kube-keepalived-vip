@@ -67,6 +67,7 @@ type keepalived struct {
 // WriteCfg creates a new keepalived configuration file.
 // In case of an error with the generation it returns the error
 func (k *keepalived) WriteCfg() error {
+	glog.Infof("22222222222222222222222")
 	w, err := os.Create(keepalivedCfg)
 	if err != nil {
 		return err
@@ -247,8 +248,8 @@ func (k *keepalived) DeleteVIP(v string) error {
 
 // AddVIP removes a VIP from the keepalived config
 func (k *keepalived) AddVIPs(bindIP string, VIPs []vip) error {
-	keepaliveMutex.Lock()
-	defer keepaliveMutex.Unlock()
+
+	glog.Infof("add vips to keepalived: %s: %s", bindIP, VIPs)
 	// delete the old VIP first
 	for index, V := range k.VIPs {
 		if V.IP == bindIP {

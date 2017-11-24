@@ -129,7 +129,7 @@ func main() {
 
 	glog.Info("starting LVS configuration")
 
-	ipvsc := controller.NewIPVSController(kubeClient, *watchNamespace, *useUnicast, *configMapName, *configLabelKey, *configLabelValue, *vrid, *proxyMode)
+	ipvsc := controller.NewIPVSController(kubeClient, *watchNamespace, *useUnicast, *configLabelKey, *configLabelValue, *vrid, *proxyMode)
 
 	ipvsc.Start()
 }
