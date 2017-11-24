@@ -117,12 +117,11 @@ type ipvsControllerController struct {
 
 	svcLister store.ServiceLister
 	epLister  store.EndpointLister
-	mapLister store.ConfigMapLister
+	//mapLister store.ConfigMapLister
+	indexer cache.Indexer
 
 	reloadRateLimiter flowcontrol.RateLimiter
 	keepalived        *keepalived
-
-	configMapName string
 
 	ruMD5 string
 
@@ -188,7 +187,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		proxyMode:  proxyMode,
 	}
 
-	ipvsc.cfmsyncQueue = task.NewTaskQueue(ipvsc.sync_cfm)
+	ipvsc.cfmsyncQueue = task.NewTaskQueue(ipvsc.syncConfigmap)
 	ipvsc.syncQueue = task.NewTaskQueue(ipvsc.sync)
 
 	err = ipvsc.keepalived.loadTemplates()
@@ -238,12 +237,21 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		cache.NewListWatchFromClient(ipvsc.client.CoreV1().RESTClient(), "endpoints", namespace, fields.Everything()),
 		&apiv1.Endpoints{}, resyncPeriod, eventHandlers)
 
-	ipvsc.mapLister.Store, ipvsc.mapController = cache.NewInformer(
+	//ipvsc.mapLister.Store, ipvsc.mapController = cache.NewInformer(
+	//	&cache.ListWatch{
+	//		ListFunc:  configMapListFunc(kubeClient, namespace, labelKey, labelValue),
+	//		WatchFunc: configMapWatchFunc(kubeClient, namespace, labelKey, labelValue),
+	//	},
+	//	&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler)
+
+
+
+	ipvsc.indexer, ipvsc.mapController = cache.NewIndexerInformer(
 		&cache.ListWatch{
 			ListFunc:  configMapListFunc(kubeClient, namespace, labelKey, labelValue),
 			WatchFunc: configMapWatchFunc(kubeClient, namespace, labelKey, labelValue),
 		},
-		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler)
+		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler, cache.Indexers{})
 
 	return &ipvsc
 }

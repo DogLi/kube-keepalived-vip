@@ -17,19 +17,15 @@ limitations under the License.
 package task
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/golang/glog"
 
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 )
 
-var (
-	keyFunc = cache.DeletionHandlingMetaNamespaceKeyFunc
-)
+const maxRetries = 15
 
 // Queue manages a work queue through an independent worker that
 // invokes the given sync function for every work item inserted.
@@ -37,12 +33,37 @@ type Queue struct {
 	// queue is the work queue the worker polls
 	queue workqueue.RateLimitingInterface
 	// sync is called for each item in the queue
-	sync func(interface{}) error
+	sync func(interface {}) error
 	// workerDone is closed when the worker exits
 	workerDone chan bool
-
-	fn func(obj interface{}) (interface{}, error)
 }
+
+func (r *Queue) handleErr(err error, obj interface {}) {
+	if err == nil {
+		// Forget about the #AddRateLimited history of the key on every successful synchronization.
+		// This ensures that future processing of updates for this key is not delayed because of
+		// an outdated error history.
+		r.queue.Forget(obj)
+		r.queue.Done(obj)
+		return
+	}
+
+	// This controller retries maxRetries times if something goes wrong. After that, it stops trying.
+	if r.queue.NumRequeues(obj) < maxRetries {
+		glog.Errorf("error syncing restore request (%v): %v", obj, err)
+
+		// Re-enqueue the key rate limited. Based on the rate limiter on the
+		// queue and the re-enqueue history, the key will be processed later again.
+		r.queue.AddRateLimited(obj)
+		return
+	}
+
+	r.queue.Forget(obj)
+	r.queue.Done(obj)
+	// Report that, even after several retries, we could not successfully process this key
+	glog.Infof("dropping restore request (%v) out of the queue: %v", obj, err)
+}
+
 
 // Run ...
 func (t *Queue) Run(period time.Duration, stopCh <-chan struct{}) {
@@ -55,29 +76,14 @@ func (t *Queue) Enqueue(obj interface{}) {
 		glog.Errorf("queue has been shutdown, failed to enqueue: %v", obj)
 		return
 	}
-
 	glog.V(3).Infof("queuing item %v", obj)
-	key, err := t.fn(obj)
-	if err != nil {
-		glog.Errorf("%v", err)
-		return
-	}
-	t.queue.Add(key)
-}
-
-func (t *Queue) defaultKeyFunc(obj interface{}) (interface{}, error) {
-	key, err := keyFunc(obj)
-	if err != nil {
-		return "", fmt.Errorf("could not get key for object %+v: %v", obj, err)
-	}
-
-	return key, nil
+	t.queue.Add(obj)
 }
 
 // worker processes work in the queue through sync.
 func (t *Queue) worker() {
 	for {
-		key, quit := t.queue.Get()
+		obj, quit := t.queue.Get()
 		if quit {
 			if !isClosed(t.workerDone) {
 				close(t.workerDone)
@@ -85,15 +91,10 @@ func (t *Queue) worker() {
 			return
 		}
 
-		glog.V(3).Infof("syncing %v", key)
-		if err := t.sync(key); err != nil {
-			glog.Warningf("requeuing %v, err %v", key, err)
-			t.queue.AddRateLimited(key)
-		} else {
-			t.queue.Forget(key)
-		}
+		glog.V(3).Infof("syncing %v", obj)
 
-		t.queue.Done(key)
+		err := t.sync(obj)
+		t.handleErr(err, obj)
 	}
 }
 
@@ -120,22 +121,16 @@ func (t *Queue) IsShuttingDown() bool {
 
 // NewTaskQueue creates a new task queue with the given sync function.
 // The sync function is called for every element inserted into the queue.
-func NewTaskQueue(syncFn func(interface{}) error) *Queue {
+func NewTaskQueue(syncFn func(interface {}) error) *Queue {
 	return NewCustomTaskQueue(syncFn, nil)
 }
 
 // NewCustomTaskQueue ...
-func NewCustomTaskQueue(syncFn func(interface{}) error, fn func(interface{}) (interface{}, error)) *Queue {
+func NewCustomTaskQueue(syncFn func(interface {}) error, fn func(interface{}) (interface{}, error)) *Queue {
 	q := &Queue{
 		queue:      workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		sync:       syncFn,
 		workerDone: make(chan bool),
-		fn:         fn,
 	}
-
-	if fn == nil {
-		q.fn = q.defaultKeyFunc
-	}
-
 	return q
 }

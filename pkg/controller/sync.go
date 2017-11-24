@@ -13,19 +13,20 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	apiv1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 
 func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.ConfigMap, error) {
-	s, exists, err := ipvsc.mapLister.Store.GetByKey(fmt.Sprintf("%v/%v", ns, name))
-	if err != nil || !exists {
+	configmap, err := ipvsc.client.ConfigMaps(ns).Get(name, metav1.GetOptions{})
+	if err != nil{
 		return nil, err
 	}
-	return s.(*apiv1.ConfigMap), nil
+	return configmap, nil
 }
 
 func (ipvsc *ipvsControllerController) getConfigMaps() []*apiv1.ConfigMap {
-	objs := ipvsc.mapLister.Store.List()
+	objs := ipvsc.indexer.List()
 	configmaps := []*apiv1.ConfigMap{}
 	for _, obj := range objs {
 		configmaps = append(configmaps, obj.(*apiv1.ConfigMap))
@@ -182,7 +183,7 @@ func (ipvsc *ipvsControllerController) freshKeepalivedConf() error {
 
 func acquire_vip() (string, error) {
 	// TODO: get vip from zstack
-	return "10.10.40.44", nil
+	return "10.10.40.45", nil
 }
 
 func restore_vip(vip string) error {
@@ -190,13 +191,10 @@ func restore_vip(vip string) error {
 	return nil
 }
 
-func (ipvsc *ipvsControllerController) processCfmSyncError(key interface{}) {
-	ipvsc.cfmsyncQueue.Enqueue(key)
-}
-
 func (ipvsc *ipvsControllerController) reload() error {
 	md5, err := checksum(keepalivedCfg)
 	if err == nil && md5 == ipvsc.ruMD5 {
+		glog.Infof("get same MD5:  %s", ipvsc.ruMD5)
 		return nil
 	}
 
@@ -246,13 +244,13 @@ func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) e
 		if err != nil {
 			glog.Errorf("error to restore vip: %s", vip)
 		}
-		err = ipvsc.keepalived.Reload()
+		err = ipvsc.reload()
 		return err
 	}
 	return nil
 }
 
-func (ipvsc *ipvsControllerController) sync(key interface{}) error {
+func (ipvsc *ipvsControllerController) sync(obj interface{}) error {
 	//glog.Infof("SSSSSSSSSSSSSS: %s", key)
 	return nil
 	//err := ipvsc.freshKeepalivedConf()
@@ -262,35 +260,25 @@ func (ipvsc *ipvsControllerController) sync(key interface{}) error {
 	//return err
 }
 
-func (ipvsc *ipvsControllerController) sync_cfm(oldkey interface{}) error {
-	obj, _, err := ipvsc.mapLister.Store.GetByKey(oldkey.(string))
-	if err != nil {
-		glog.Errorf("sync error: get configmap %%s ", oldkey)
-		return err
-	}
+func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
+
 	ipvsc.reloadRateLimiter.Accept()
 
-	oldCM := obj.(*apiv1.ConfigMap)
+	oldCM := oldobj.(*apiv1.ConfigMap)
 	cmName := oldCM.GetObjectMeta().GetName()
 	cmNamespace := oldCM.GetObjectMeta().GetNamespace()
 	cmData := oldCM.Data
-	_, err = ipvsc.getConfigMap(cmNamespace, cmName)
+	_, err := ipvsc.getConfigMap(cmNamespace, cmName)
 	glog.Infof("in sync configmap %s, data: %s", oldCM.Name, cmData)
 	// on delete configmap
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			err = ipvsc.OnDeleteConfigmap(oldCM)
 		}
-		if err != nil {
-			ipvsc.processCfmSyncError(oldkey)
-		}
 		return err
 	}
 
 	// on create configmap, bind_ip is not set
 	err = ipvsc.OnSyncConfigmap(oldCM)
-	if err != nil {
-		ipvsc.processCfmSyncError(oldkey)
-	}
 	return err
 }

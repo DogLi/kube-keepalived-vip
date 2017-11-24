@@ -231,15 +231,11 @@ func (k *keepalived) DeleteVIP(v string) error {
 		if VIP.IP == v {
 			find = true
 			newVIP = append(k.VIPs[:index], k.VIPs[index+1:]...)
-			err := k.removeVIP(v)
-			if err != nil {
-				return err
-			}
 			k.VIPs = newVIP
 		}
 	}
 	if find == false {
-		glog.Errorf("VIP %v had not been added.", v)
+		glog.Errorf("VIP %v had not been deleted.", v)
 		return nil
 	}
 	err := k.WriteCfg()
