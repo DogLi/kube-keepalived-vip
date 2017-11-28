@@ -77,7 +77,7 @@ func (c serviceByIPPort) Less(i, j int) bool {
 
 type vip struct {
 	Name      string
-	IP        string
+	VIP       string
 	Port      int
 	Protocol  string
 	LVSMethod string
@@ -95,8 +95,8 @@ func (c vipByNameIPPort) Less(i, j int) bool {
 		return iName < jName
 	}
 
-	iIP := c[i].IP
-	jIP := c[j].IP
+	iIP := c[i].VIP
+	jIP := c[j].VIP
 	if iIP != jIP {
 		return iIP < jIP
 	}
@@ -203,15 +203,10 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 			ipvsc.cfmsyncQueue.Enqueue(obj)
 		},
 		UpdateFunc: func(old, cur interface{}) {
-			//if !reflect.DeepEqual(old, cur) {
-			//	oldCM := old.(*apiv1.ConfigMap)
-			//	curCM := cur.(*apiv1.ConfigMap)
-			//	configMapMutex.Lock()
-			//	defer configMapMutex.Unlock()
-			//	curCM.Data = oldCM.Data
-			//	return
-			//}
-			ipvsc.cfmsyncQueue.Enqueue(cur)
+			if !reflect.DeepEqual(old, cur) {
+				ipvsc.OnUpdateConfigmap(old, cur)
+			}
+
 		},
 	}
 
@@ -236,15 +231,6 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	ipvsc.epLister.Store, ipvsc.epController = cache.NewInformer(
 		cache.NewListWatchFromClient(ipvsc.client.CoreV1().RESTClient(), "endpoints", namespace, fields.Everything()),
 		&apiv1.Endpoints{}, resyncPeriod, eventHandlers)
-
-	//ipvsc.mapLister.Store, ipvsc.mapController = cache.NewInformer(
-	//	&cache.ListWatch{
-	//		ListFunc:  configMapListFunc(kubeClient, namespace, labelKey, labelValue),
-	//		WatchFunc: configMapWatchFunc(kubeClient, namespace, labelKey, labelValue),
-	//	},
-	//	&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler)
-
-
 
 	ipvsc.indexer, ipvsc.mapController = cache.NewIndexerInformer(
 		&cache.ListWatch{
@@ -297,10 +283,10 @@ func (ipvsc *ipvsControllerController) Start() {
 	}
 
 	glog.Info("starting keepalived to announce VIPs")
-	//err := ipvsc.freshKeepalivedConf()
-	//if err == nil {
-	//}
-	ipvsc.keepalived.Start()
+	err := ipvsc.freshKeepalivedConf()
+	if err == nil {
+		ipvsc.keepalived.Start()
+	}
 }
 
 // Stop stops the loadbalancer controller.
@@ -321,4 +307,45 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	}
 	ipvsc.keepalived.Stop()
 	return fmt.Errorf("shutdown already in progress")
+}
+
+func (ipvsc *ipvsControllerController) updateConfigMapStatusBindIP(errMessage string, bindIP string, configMap *apiv1.ConfigMap) {
+	configMapData := configMap.Data
+
+	//set status
+	if errMessage != "" {
+		configMapData["status"] = "ERROR : " + errMessage
+		delete(configMapData, "bind-ip")
+	} else if bindIP != "" {
+		configMapData["status"] = "SUCCESS"
+		configMapData["bind_ip"] = bindIP
+	}
+
+	_, err := ipvsc.client.ConfigMaps(configMap.Namespace).Update(configMap)
+	if err != nil {
+		glog.Errorf("Error updating ConfigMap Status : %v", err)
+	}
+}
+
+func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
+	name := fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
+	Services := ipvsc.keepalived.Services
+	glog.Infof("IIIIIIIIIIIII Keepalived: %s", name)
+	for key, value := range Services {
+		glog.Info("VVVVVVVVVVVV    %s    %s", key, value)
+		if name == value {
+			return true
+		}
+	}
+	return false
+}
+
+func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
+	indexes := [] string {"target_service", "bind_ip", "type"}
+	for _, index := range indexes {
+		if CM1.Data[index] != CM2.Data[index] {
+			return false
+		}
+	}
+	return true
 }

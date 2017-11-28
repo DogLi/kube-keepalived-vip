@@ -8,12 +8,15 @@ import (
 	"encoding/hex"
 	"os/signal"
 	"syscall"
+	"math/rand"
+	"time"
 	"github.com/golang/glog"
 	"sort"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	apiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 )
 
 
@@ -27,6 +30,7 @@ func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.Con
 
 func (ipvsc *ipvsControllerController) getConfigMaps() []*apiv1.ConfigMap {
 	objs := ipvsc.indexer.List()
+	glog.Info("CCCCCCCCCCCCCCCC get configmap length: %s", len(objs))
 	configmaps := []*apiv1.ConfigMap{}
 	for _, obj := range objs {
 		configmaps = append(configmaps, obj.(*apiv1.ConfigMap))
@@ -99,9 +103,13 @@ func (ipvsc *ipvsControllerController) getEndpoints(
 			for _, epAddress := range ss.Addresses {
 				endpoints = append(endpoints, service{IP: epAddress.IP, Port: targetPort})
 			}
+			for _, epAddress := range ss.NotReadyAddresses {
+				endpoints = append(endpoints, service{IP: epAddress.IP, Port: targetPort})
+			}
 		}
 	}
 
+	glog.Infof("get endpointd: %s", endpoints)
 	return endpoints
 }
 
@@ -117,9 +125,9 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 		ns = "default"
 		cm.Data["target_namespace"] = ns
 	}
-	kind, ok := cmData["kind"] // ["NAT", "DR", "PROXY"]
+	lvs_method, ok := cmData["kind"] // ["NAT", "DR", "PROXY"]
 	if !ok {
-		kind = "NAT"
+		lvs_method = "NAT"
 		cm.Data["kind"] = "NAT"
 	}
 
@@ -146,10 +154,10 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 		sort.Sort(serviceByIPPort(ep))
 
 		svcs = append(svcs, vip{
-			Name:      fmt.Sprintf("%v-%v", s.Namespace, s.Name),
-			IP:        bind_ip,
+			Name:      fmt.Sprintf("%v/%v", s.GetNamespace(), s.GetName()),
+			VIP:        bind_ip,
 			Port:      int(servicePort.Port),
-			LVSMethod: kind,
+			LVSMethod: lvs_method,
 			Backends:  ep,
 			Protocol:  fmt.Sprintf("%v", servicePort.Protocol),
 		})
@@ -159,10 +167,24 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 	return svcs, nil
 }
 
-func (ipvsc *ipvsControllerController) getServices() []vip {
+func getServicename(cfm *apiv1.ConfigMap) string {
+	cfmData := cfm.Data
+	namespace, ok := cfmData["target_namespace"]
+	if !ok {
+		namespace = "default"
+	}
+	service := cfmData["target_svc"]
+	return fmt.Sprintf("%v/%v", namespace, service)
+}
+
+func (ipvsc *ipvsControllerController) getServices() ([]vip, map[string]string) {
 	configmaps := ipvsc.getConfigMaps()
 	svcs := []vip{}
+	CfmSvc := make(map[string]string)
 	for _, configmap := range configmaps {
+		key := fmt.Sprintf("%s/%s", configmap.GetNamespace(), configmap.GetName())
+		glog.Infof("Find configmap %s", key)
+		CfmSvc[key] = getServicename(configmap)
 		svc, err := ipvsc.getService(configmap)
 		if err != nil {
 			glog.Warningf("can not get service info from configmap %s", configmap.Name)
@@ -171,23 +193,30 @@ func (ipvsc *ipvsControllerController) getServices() []vip {
 		svcs = append(svcs, svc...)
 	}
 	sort.Sort(vipByNameIPPort(svcs))
-	return svcs
+	return svcs, CfmSvc
 }
 
 func (ipvsc *ipvsControllerController) freshKeepalivedConf() error {
 	// get all svcs and restart keepalived
-	ipvsc.keepalived.VIPs = ipvsc.getServices()
+	ipvsc.keepalived.VIPs, ipvsc.keepalived.Services  = ipvsc.getServices()
 	err := ipvsc.keepalived.WriteCfg()
 	return err
 }
 
 func acquire_vip() (string, error) {
 	// TODO: get vip from zstack
-	return "10.10.40.45", nil
+	ips := [] string {"61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73"}
+	rand.Seed(time.Now().Unix())
+	ip := "10.10.40." + ips[rand.Intn(len(ips))]
+
+	ip = "10.10.40.61"
+	glog.Info("get IP from zstack: %s", ip)
+	return ip, nil
 }
 
 func restore_vip(vip string) error {
 	// TODO: return vip to zstack
+	glog.Infof("return back the ip {}", vip)
 	return nil
 }
 
@@ -206,7 +235,7 @@ func (ipvsc *ipvsControllerController) reload() error {
 func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) error {
 	cfm = cfm.DeepCopy()
 	cmData := cfm.Data
-	svc := cmData["target_service"]
+	svc := cmData["target_svc"]
 	_, ok := cmData["bind_ip"]
 	if !ok {
 		bindIp, err := acquire_vip()
@@ -232,7 +261,50 @@ func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) err
 	return err
 }
 
+func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) error{
+	oldCM := old.(*apiv1.ConfigMap)
+	curCM := cur.(*apiv1.ConfigMap)
+	if configmapsEqual(oldCM, curCM) {
+		return nil
+	}
+
+	old_bind_ip, ok := oldCM.Data["bind_ip"]
+	if !ok {
+		// if the oldCM does'nt have bind_ip and current bind_ip has bind_ip, update it
+		ipvsc.cfmsyncQueue.Enqueue(cur)
+		return nil
+	} else {
+		cur_bind_ip, ok := curCM.Data["bind_ip"]
+		if ok {
+			// if we want to update the existed bind_ip, return back the old bind ip and then update to the new one
+			if old_bind_ip != cur_bind_ip {
+				// return old_bind_ip
+				err := restore_vip(old_bind_ip)
+				ipvsc.cfmsyncQueue.Enqueue(cur)
+				return err
+			}
+		} else {
+			// we should not delete the old bind_ip
+			curCM.Data["bind_ip"] = old_bind_ip
+			_, err := ipvsc.client.ConfigMaps(curCM.GetNamespace()).Update(curCM)
+			if err != nil {
+				glog.Errorf("error to update configmap %s/%s with Data: %s", curCM.GetNamespace(), curCM.GetName(), err)
+			}
+			return fmt.Errorf("you delete the bind_ip: %s", old_bind_ip)
+		}
+
+		// we should not change the target service
+		if curCM.Data["target_svc"] != oldCM.Data["target_svc"] || curCM.Data["target_namespace"] != oldCM.Data["target_namespace"] {
+			glog.Errorf("you are trying to change the target service or target service namespace, forbidden!")
+			curCM.Data = oldCM.Data
+			ipvsc.client.ConfigMaps(curCM.GetNamespace()).Update(curCM)
+		}
+	}
+	return nil
+}
+
 func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) error {
+	delete(ipvsc.keepalived.Services, fmt.Sprintf("%s/%s", cfm.GetNamespace(), cfm.GetName()))
 	cmData := cfm.Data
 	vip, ok := cmData["bind_ip"]
 	if ok {
@@ -251,13 +323,18 @@ func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) e
 }
 
 func (ipvsc *ipvsControllerController) sync(obj interface{}) error {
-	//glog.Infof("SSSSSSSSSSSSSS: %s", key)
-	return nil
-	//err := ipvsc.freshKeepalivedConf()
-	//if err == nil {
-	//	err = ipvsc.reload()
-	//}
-	//return err
+	objMeta, err := meta.Accessor(obj)
+	if err == nil {
+		if ipvsc.INKeepalived(objMeta) {
+			glog.Infof("SSSSSSSSSSSSSS: %s", obj)
+			err := ipvsc.freshKeepalivedConf()
+			if err == nil {
+				err = ipvsc.reload()
+			}
+			return err
+		}
+	}
+	return err
 }
 
 func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
@@ -280,5 +357,8 @@ func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
 
 	// on create configmap, bind_ip is not set
 	err = ipvsc.OnSyncConfigmap(oldCM)
+	if err != nil {
+		ipvsc.updateConfigMapStatusBindIP(err.Error(), "", oldCM)
+	}
 	return err
 }

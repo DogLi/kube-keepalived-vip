@@ -23,11 +23,6 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-// ConfigMapLister makes a Store that lists Configmaps.
-type ConfigMapLister struct {
-	cache.Store
-}
-
 // ServiceLister makes a Store that lists Services.
 type ServiceLister struct {
 	cache.Store
@@ -47,5 +42,5 @@ func (s *EndpointLister) GetServiceEndpoints(svc *api.Service) (ep api.Endpoints
 		}
 	}
 	err = fmt.Errorf("could not find endpoints for service: %v", svc.Name)
-	return
+	return api.Endpoints{}, err
 }

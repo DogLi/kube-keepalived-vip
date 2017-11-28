@@ -56,6 +56,7 @@ type keepalived struct {
 	useUnicast     bool
 	started        bool
 	VIPs           []vip
+	Services       map [string]string
 	keepalivedTmpl *template.Template
 	haproxyTmpl    *template.Template
 	cmd            *exec.Cmd
@@ -67,7 +68,6 @@ type keepalived struct {
 // WriteCfg creates a new keepalived configuration file.
 // In case of an error with the generation it returns the error
 func (k *keepalived) WriteCfg() error {
-	glog.Infof("22222222222222222222222")
 	w, err := os.Create(keepalivedCfg)
 	if err != nil {
 		return err
@@ -106,8 +106,8 @@ func (k *keepalived) WriteCfg() error {
 	var buffer bytes.Buffer
 	k.keepalivedTmpl.Execute(&buffer, conf)
 	content := buffer.String()
-	glog.Infof("XXXXXXXXXXXXX:   %s", VIPs)
-	glog.Infof("============:\n%s", content)
+	glog.Infof("XXXXXXXXXXXXX  VIPs:   %s", VIPs)
+	glog.Infof("============ content:\n%s", content)
 
 	if k.proxyMode {
 		w, err := os.Create(haproxyCfg)
@@ -127,7 +127,7 @@ func (k *keepalived) WriteCfg() error {
 func (k *keepalived) getVIPs() []string {
 	result := []string{}
 	for _, VIP := range k.VIPs {
-		result = appendIfMissing(result, VIP.IP)
+		result = appendIfMissing(result, VIP.VIP)
 	}
 	return result
 }
@@ -166,7 +166,6 @@ func (k *keepalived) Start() {
 	}
 
 	k.started = true
-
 	if err := k.cmd.Start(); err != nil {
 		glog.Errorf("keepalived error: %v", err)
 	}
@@ -225,18 +224,12 @@ func (k *keepalived) removeVIP(vip string) error {
 // DeleteVIP removes a VIP from the keepalived config
 func (k *keepalived) DeleteVIP(v string) error {
 	newVIP := []vip{}
-	find := false
 	glog.Infof("Deleing VIP %v", v)
 	for index, VIP := range k.VIPs {
-		if VIP.IP == v {
-			find = true
+		if VIP.VIP == v {
 			newVIP = append(k.VIPs[:index], k.VIPs[index+1:]...)
 			k.VIPs = newVIP
 		}
-	}
-	if find == false {
-		glog.Errorf("VIP %v had not been deleted.", v)
-		return nil
 	}
 	err := k.WriteCfg()
 	return err
@@ -248,7 +241,7 @@ func (k *keepalived) AddVIPs(bindIP string, VIPs []vip) error {
 	glog.Infof("add vips to keepalived: %s: %s", bindIP, VIPs)
 	// delete the old VIP first
 	for index, V := range k.VIPs {
-		if V.IP == bindIP {
+		if V.VIP == bindIP {
 			k.VIPs = append(k.VIPs[:index], k.VIPs[index+1:]...)
 		}
 	}

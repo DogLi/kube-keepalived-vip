@@ -55,7 +55,7 @@ vrrp_instance vips {
 # VIP Service with no pods: {{ $svc.IP }} 
 {{ else }}
 # Service: {{ $svc.Name }}
-virtual_server {{ $svc.IP }} {{ $svc.Port }} {
+virtual_server {{ $svc.VIP }} {{ $svc.Port }} {
   delay_loop 5
   lvs_sched wlc
   lvs_method {{ $svc.LVSMethod }}
