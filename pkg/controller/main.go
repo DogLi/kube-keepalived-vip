@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"fmt"
+	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 )
 
 const (
@@ -136,7 +137,6 @@ type ipvsControllerController struct {
 	cfmsyncQueue *task.Queue
 
 	stopCh    chan struct{}
-	stopCfgCh chan struct{}
 }
 
 
@@ -197,14 +197,19 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 
 	mapEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
+			glog.Info("add configmap")
 			ipvsc.cfmsyncQueue.Enqueue(obj)
 		},
 		DeleteFunc: func(obj interface{}) {
+			glog.Info("delete configmap")
 			ipvsc.cfmsyncQueue.Enqueue(obj)
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if !reflect.DeepEqual(old, cur) {
+				glog.Infof("update configmap, old configmap and current configmap are not equal")
 				ipvsc.OnUpdateConfigmap(old, cur)
+			} else {
+				glog.Info("updata configmap, old configmap and currentconfigmap are equal")
 			}
 
 		},
@@ -263,8 +268,8 @@ func (ipvsc *ipvsControllerController) Start() {
 	go ipvsc.svcController.Run(ipvsc.stopCh)
 	go ipvsc.syncQueue.Run(time.Second, ipvsc.stopCh)
 
-	go ipvsc.mapController.Run(ipvsc.stopCfgCh)
-	go ipvsc.cfmsyncQueue.Run(time.Second, ipvsc.stopCfgCh)
+	go ipvsc.mapController.Run(ipvsc.stopCh)
+	go ipvsc.cfmsyncQueue.Run(time.Second, ipvsc.stopCh)
 
 	go handleSigterm(ipvsc)
 
@@ -272,15 +277,15 @@ func (ipvsc *ipvsControllerController) Start() {
 	if !cache.WaitForCacheSync(ipvsc.stopCh,
 		ipvsc.epController.HasSynced,
 		ipvsc.svcController.HasSynced,
-	) {
-		k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
-	}
-
-	if !cache.WaitForCacheSync(ipvsc.stopCfgCh,
 		ipvsc.mapController.HasSynced,
 	) {
 		k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 	}
+
+	//if !cache.WaitForCacheSync(ipvsc.stopCfgCh,
+	//) {
+	//	k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+	//}
 
 	glog.Info("starting keepalived to announce VIPs")
 	err := ipvsc.freshKeepalivedConf()
@@ -294,15 +299,15 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	ipvsc.stopLock.Lock()
 	defer ipvsc.stopLock.Unlock()
 
+	close(ipvsc.stopCh)
 	if !ipvsc.syncQueue.IsShuttingDown() {
-		glog.Infof("shutting down controller queues")
-		close(ipvsc.stopCh)
+		glog.Infof("shutting down controller sync queues")
 		go ipvsc.syncQueue.Shutdown()
+
 	}
 
 	if !ipvsc.cfmsyncQueue.IsShuttingDown() {
-		glog.Infof("shutting down controller queues")
-		close(ipvsc.stopCfgCh)
+		glog.Infof("shutting down controller configmap sysnc queues")
 		go ipvsc.cfmsyncQueue.Shutdown()
 	}
 	ipvsc.keepalived.Stop()
@@ -318,7 +323,7 @@ func (ipvsc *ipvsControllerController) updateConfigMapStatusBindIP(errMessage st
 		delete(configMapData, "bind-ip")
 	} else if bindIP != "" {
 		configMapData["status"] = "SUCCESS"
-		configMapData["bind_ip"] = bindIP
+		configMapData[constants.BindIP] = bindIP
 	}
 
 	_, err := ipvsc.client.ConfigMaps(configMap.Namespace).Update(configMap)
@@ -330,9 +335,7 @@ func (ipvsc *ipvsControllerController) updateConfigMapStatusBindIP(errMessage st
 func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
 	name := fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
 	Services := ipvsc.keepalived.Services
-	glog.Infof("IIIIIIIIIIIII Keepalived: %s", name)
-	for key, value := range Services {
-		glog.Info("VVVVVVVVVVVV    %s    %s", key, value)
+	for _, value := range Services {
 		if name == value {
 			return true
 		}
@@ -341,7 +344,7 @@ func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
 }
 
 func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
-	indexes := [] string {"target_service", "bind_ip", "type"}
+	indexes := [] string {constants.TargetService, constants.BindIP, constants.LvsMethod}
 	for _, index := range indexes {
 		if CM1.Data[index] != CM2.Data[index] {
 			return false

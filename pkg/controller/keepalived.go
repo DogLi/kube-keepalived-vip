@@ -31,20 +31,11 @@ import (
 	"k8s.io/kubernetes/pkg/util/iptables"
 	k8sexec "k8s.io/utils/exec"
 	"sort"
+	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 )
 
-const (
-	iptablesChain = "KUBE-KEEPALIVED-VIP"
-	keepalivedCfg = "/etc/keepalived/keepalived.conf"
-	haproxyCfg    = "/etc/haproxy/haproxy.cfg"
-)
 
 var keepaliveMutex sync.Mutex
-
-var (
-	keepalivedTmpl = "keepalived.tmpl"
-	haproxyTmpl    = "haproxy.tmpl"
-)
 
 type keepalived struct {
 	iface          string
@@ -68,7 +59,7 @@ type keepalived struct {
 // WriteCfg creates a new keepalived configuration file.
 // In case of an error with the generation it returns the error
 func (k *keepalived) WriteCfg() error {
-	w, err := os.Create(keepalivedCfg)
+	w, err := os.Create(constants.KeepalivedCfg)
 	if err != nil {
 		return err
 	}
@@ -79,7 +70,7 @@ func (k *keepalived) WriteCfg() error {
 	defer w.Close()
 
 	conf := make(map[string]interface{})
-	conf["iptablesChain"] = iptablesChain
+	conf["iptablesChain"] = constants.IptablesChain
 	conf["iface"] = k.iface
 	conf["myIP"] = k.ip
 	conf["netmask"] = k.netmask
@@ -98,7 +89,7 @@ func (k *keepalived) WriteCfg() error {
 	}
 
 	if err = k.keepalivedTmpl.Execute(w, conf); err != nil {
-		glog.Infof("error to generate keepalived config: %s", keepalivedCfg)
+		glog.Infof("error to generate keepalived config: %s", constants.KeepalivedCfg)
 		return err
 	}
 
@@ -110,7 +101,7 @@ func (k *keepalived) WriteCfg() error {
 	glog.Infof("============ content:\n%s", content)
 
 	if k.proxyMode {
-		w, err := os.Create(haproxyCfg)
+		w, err := os.Create(constants.HaproxyCfg)
 		if err != nil {
 			return err
 		}
@@ -143,12 +134,12 @@ func (k *keepalived) resetIPVS() error {
 // Start starts a keepalived process in foreground.
 // In case of any error it will terminate the execution with a fatal error
 func (k *keepalived) Start() {
-	ae, err := k.ipt.EnsureChain(iptables.TableFilter, iptables.Chain(iptablesChain))
+	ae, err := k.ipt.EnsureChain(iptables.TableFilter, iptables.Chain(constants.IptablesChain))
 	if err != nil {
 		glog.Fatalf("unexpected error: %v", err)
 	}
 	if ae {
-		glog.V(2).Infof("chain %v already existed", iptablesChain)
+		glog.V(2).Infof("chain %v already existed", constants.IptablesChain)
 	}
 
 	k.cmd = exec.Command("keepalived",
@@ -198,9 +189,9 @@ func (k *keepalived) Stop() {
 		k.removeVIP(vip)
 	}
 
-	err := k.ipt.FlushChain(iptables.TableFilter, iptables.Chain(iptablesChain))
+	err := k.ipt.FlushChain(iptables.TableFilter, iptables.Chain(constants.IptablesChain))
 	if err != nil {
-		glog.V(2).Infof("unexpected error flushing iptables chain %v: %v", err, iptablesChain)
+		glog.V(2).Infof("unexpected error flushing iptables chain %v: %v", err, constants.IptablesChain)
 	}
 
 	err = syscall.Kill(k.cmd.Process.Pid, syscall.SIGTERM)
@@ -253,13 +244,13 @@ func (k *keepalived) AddVIPs(bindIP string, VIPs []vip) error {
 }
 
 func (k *keepalived) loadTemplates() error {
-	tmpl, err := template.ParseFiles(keepalivedTmpl)
+	tmpl, err := template.ParseFiles(constants.KeepalivedTmpl)
 	if err != nil {
 		return err
 	}
 	k.keepalivedTmpl = tmpl
 
-	tmpl, err = template.ParseFiles(haproxyTmpl)
+	tmpl, err = template.ParseFiles(constants.HaproxyTmpl)
 	if err != nil {
 		return err
 	}
