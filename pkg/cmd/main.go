@@ -23,7 +23,6 @@ import (
 	"os"
 
 	"github.com/golang/glog"
-	"github.com/spf13/pflag"
 
 	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -37,33 +36,6 @@ import (
 )
 
 var (
-	flags = pflag.NewFlagSet("", pflag.ExitOnError)
-
-	apiserverHost = flags.String("apiserver-host", "", "The address of the Kubernetes Apiserver "+
-		"to connect to in the format of protocol://address:port, e.g., "+
-		"http://localhost:8080. If not specified, the assumption is that the binary runs inside a "+
-		"Kubernetes cluster and local discovery is attempted.")
-
-	kubeConfigFile = flags.String("kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
-
-	watchNamespace = flags.String("watch-namespace", apiv1.NamespaceAll,
-		`Namespace to watch for Ingress. Default is to watch all namespaces`)
-
-	useUnicast = flags.Bool("use-unicast", false, `use unicast instead of multicast for communication
-		with other keepalived instances`)
-
-	configMapName = flags.String("services-configmap", "",
-		`Name of the ConfigMap that contains the definition of the services to expose.
-		The key in the map indicates the external IP to use. The value is the name of the 
-		service with the format namespace/serviceName and the port of the service could be a number or the
-		name of the port.`)
-
-	proxyMode = flags.Bool("proxy-protocol-mode", false, `If true, it will use keepalived to announce the virtual
-		IP address/es and HAProxy with proxy protocol to forward traffic to the endpoints.
-		Please check http://blog.haproxy.com/haproxy/proxy-protocol
-		Be sure that both endpoints of the connection support proxy protocol.
-		`)
-
 	// sysctl changes required by keepalived
 	sysctlAdjustments = map[string]int{
 		// allows processes to bind() to non-local IP addresses
@@ -71,36 +43,60 @@ var (
 		// enable connection tracking for LVS connections
 		"net/ipv4/vs/conntrack": 1,
 	}
-
-	vrid = flags.Int("vrid", 50,
-		`The keepalived VRID (Virtual Router Identifier, between 0 and 255 as per 
-      RFC-5798), which must be different for every Virtual Router (ie. every 
-      keepalived sets) running on the same network.`)
-
-	configLabelKey   = flags.String("labelKey", "loadbalancer", "watch the configmap with label configLabelKey: configLabelValue")
-	configLabelValue = flag.String("labelValue", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
+	apiserverHost  string
+	kubeConfigFile string
+	watchNamespace string
+	useUnicast     bool
+	configMapName  string
+	configmapLabel string
+	proxyMode      bool
+	vrid           int
 )
 
+func init() {
+	flag.StringVar(&apiserverHost, "apiserver-host", "", "The address of the Kubernetes Apiserver "+
+		"to connect to in the format of protocol://address:port, e.g., "+
+		"http://localhost:8080. If not specified, the assumption is that the binary runs inside a "+
+		"Kubernetes cluster and local discovery is attempted.")
+
+	flag.StringVar(&kubeConfigFile, "kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
+
+	flag.StringVar(&watchNamespace, "watch-namespace", apiv1.NamespaceAll,
+		`Namespace to watch for Ingress. Default is to watch all namespaces`)
+
+	flag.BoolVar(&useUnicast, "use-unicast", false, `use unicast instead of multicast for communication
+		with other keepalived instances`)
+
+	flag.StringVar(&configMapName, "services-configmap", "",
+		`Name of the ConfigMap that contains the definition of the services to expose.
+		The key in the map indicates the external IP to use. The value is the name of the
+		service with the format namespace/serviceName and the port of the service could be a number or the
+		name of the port.`)
+
+	flag.BoolVar(&proxyMode, "proxy-protocol-mode", false, `If true, it will use keepalived to announce the virtual
+		IP address/es and HAProxy with proxy protocol to forward traffic to the endpoints.
+		Please check http://blog.haproxy.com/haproxy/proxy-protocol
+		Be sure that both endpoints of the connection support proxy protocol.
+		`)
+	flag.IntVar(&vrid, "vrid", 50,
+		`The keepalived VRID (Virtual Router Identifier, between 0 and 255 as per
+      RFC-5798), which must be different for every Virtual Router (ie. every
+      keepalived sets) running on the same network.`)
+
+	flag.StringVar(&configmapLabel, "labelValue", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
+}
+
 func main() {
-	flags.AddGoFlagSet(flag.CommandLine)
-	flags.Parse(os.Args)
+	flag.Parse()
 
 	flag.Set("logtostderr", "true")
 
-	if *configMapName == "" {
-		glog.Fatalf("Please specify --services-configmap")
-	}
-
-	if *vrid < 0 || *vrid > 255 {
+	if vrid < 0 || vrid > 255 {
 		glog.Fatalf("Error using VRID %d, only values between 0 and 255 are allowed.", vrid)
 	}
 
-	if *useUnicast {
+	if useUnicast {
 		glog.Info("keepalived will use unicast to sync the nodes")
-	}
-
-	if *vrid < 0 || *vrid > 255 {
-		glog.Fatalf("Error using VRID %d, only values between 0 and 255 are allowed.", vrid)
 	}
 
 	err := loadIPVModule()
@@ -118,18 +114,18 @@ func main() {
 		glog.Fatalf("unexpected error: %v", err)
 	}
 
-	if *proxyMode {
+	if proxyMode {
 		copyHaproxyCfg()
 	}
 
-	kubeClient, err := createApiserverClient(*apiserverHost, *kubeConfigFile)
+	kubeClient, err := createApiserverClient(apiserverHost, kubeConfigFile)
 	if err != nil {
 		handleFatalInitError(err)
 	}
 
 	glog.Info("starting LVS configuration")
 
-	ipvsc := controller.NewIPVSController(kubeClient, *watchNamespace, *useUnicast, *configLabelKey, *configLabelValue, *vrid, *proxyMode)
+	ipvsc := controller.NewIPVSController(kubeClient, watchNamespace, useUnicast, configmapLabel, vrid, proxyMode)
 
 	ipvsc.Start()
 }

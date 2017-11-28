@@ -183,7 +183,7 @@ func (k *keepalived) Reload() error {
 }
 
 // Stop keepalived process
-func (k *keepalived) Stop() {
+func (k *keepalived) Stop() error{
 	vips := k.getVIPs()
 	for _, vip := range vips {
 		k.removeVIP(vip)
@@ -198,6 +198,7 @@ func (k *keepalived) Stop() {
 	if err != nil {
 		glog.Errorf("error stopping keepalived: %v", err)
 	}
+	return err
 }
 
 func (k *keepalived) removeVIP(vip string) error {

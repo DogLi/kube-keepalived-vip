@@ -142,7 +142,7 @@ type ipvsControllerController struct {
 
 
 // NewIPVSController creates a new controller from the given config.
-func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, labelKey, labelValue string, vrid int, proxyMode bool) *ipvsControllerController {
+func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) *ipvsControllerController {
 	ipvsc := ipvsControllerController{
 		client:            kubeClient,
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
@@ -239,24 +239,24 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 
 	ipvsc.indexer, ipvsc.mapController = cache.NewIndexerInformer(
 		&cache.ListWatch{
-			ListFunc:  configMapListFunc(kubeClient, namespace, labelKey, labelValue),
-			WatchFunc: configMapWatchFunc(kubeClient, namespace, labelKey, labelValue),
+			ListFunc:  configMapListFunc(kubeClient, namespace, configmapLabel),
+			WatchFunc: configMapWatchFunc(kubeClient, namespace,configmapLabel),
 		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler, cache.Indexers{})
 
 	return &ipvsc
 }
 
-func configMapListFunc(c *kubernetes.Clientset, ns string, labelKey, labelValue string) func(metav1.ListOptions) (runtime.Object, error) {
+func configMapListFunc(c *kubernetes.Clientset, ns string, labelValue string) func(metav1.ListOptions) (runtime.Object, error) {
 	return func(options metav1.ListOptions) (runtime.Object, error) {
-		options.LabelSelector = labels.Set{labelKey: labelValue}.AsSelector().String()
+		options.LabelSelector = labels.Set{"loadbalancer": labelValue}.AsSelector().String()
 		return c.ConfigMaps(ns).List(options)
 	}
 }
 
-func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelKey, labelValue string) func(options metav1.ListOptions) (watch.Interface, error) {
+func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelValue string) func(options metav1.ListOptions) (watch.Interface, error) {
 	return func(options metav1.ListOptions) (watch.Interface, error) {
-		options.LabelSelector = labels.Set{labelKey: labelValue}.AsSelector().String()
+		options.LabelSelector = labels.Set{"loadbalancer": labelValue}.AsSelector().String()
 		return c.ConfigMaps(ns).Watch(options)
 	}
 }
@@ -310,8 +310,8 @@ func (ipvsc *ipvsControllerController) Stop() error {
 		glog.Infof("shutting down controller configmap sysnc queues")
 		go ipvsc.cfmsyncQueue.Shutdown()
 	}
-	ipvsc.keepalived.Stop()
-	return fmt.Errorf("shutdown already in progress")
+	err := ipvsc.keepalived.Stop()
+	return err
 }
 
 func (ipvsc *ipvsControllerController) updateConfigMapStatusBindIP(errMessage string, bindIP string, configMap *apiv1.ConfigMap) {
