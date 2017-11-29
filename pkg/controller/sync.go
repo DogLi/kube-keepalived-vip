@@ -12,12 +12,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"math/rand"
 	"os"
 	"os/signal"
 	"sort"
 	"syscall"
-	"time"
 )
 
 func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.ConfigMap, error) {
@@ -108,7 +106,7 @@ func (ipvsc *ipvsControllerController) getEndpoints(
 		}
 	}
 
-	glog.Infof("get endpointd: %s", endpoints)
+	glog.V(2).Infof("get endpointd: %s", endpoints)
 	return endpoints
 }
 
@@ -128,6 +126,7 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 	if !ok {
 		lvs_method = "NAT"
 		cm.Data[constants.LvsMethod] = "NAT"
+		glog.Infof("set the lvs_method to NAT for configmap %s", cm.GetName())
 	}
 
 	nsSvc := fmt.Sprintf("%v/%v", ns, svc)
@@ -202,23 +201,6 @@ func (ipvsc *ipvsControllerController) freshKeepalivedConf() error {
 	return err
 }
 
-func acquire_vip() (string, error) {
-	// TODO: get vip from zstack
-	ips := []string{"61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73"}
-	rand.Seed(time.Now().Unix())
-	ip := "10.10.40." + ips[rand.Intn(len(ips))]
-
-	ip = "10.10.40.61"
-	glog.Info("get IP from zstack: %s", ip)
-	return ip, nil
-}
-
-func restore_vip(vip string) error {
-	// TODO: return vip to zstack
-	glog.Infof("return back the ip {}", vip)
-	return nil
-}
-
 func (ipvsc *ipvsControllerController) reload() error {
 	md5, err := checksum(constants.KeepalivedCfg)
 	if err == nil && md5 == ipvsc.ruMD5 {
@@ -231,26 +213,44 @@ func (ipvsc *ipvsControllerController) reload() error {
 	return err
 }
 
-func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) error {
+func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) error {
+	cfm = cfm.DeepCopy()
 	configMapMutex.Lock()
 	defer configMapMutex.Unlock()
-	cfm = cfm.DeepCopy()
 	cmData := cfm.Data
-	svc := cmData[constants.TargetService]
 	_, ok := cmData[constants.BindIP]
+	// add configmap without bind ip
 	if !ok {
+		// name & namespace
+		targetService := cfm.Data[constants.TargetService]
+		targetNamespace, ok := cfm.Data[constants.TargetNamespace]
+		if !ok {
+			targetNamespace = "default"
+			cfm.Data[constants.TargetNamespace] = targetNamespace
+		}
+		key := fmt.Sprintf("%s/%s", cfm.GetNamespace(), cfm.GetName)
+		value := fmt.Sprintf("%s/%s", targetNamespace, targetService)
+		ipvsc.keepalived.Services[key] = value
+
+		// bind ip
 		bindIp, err := acquire_vip()
 		if err != nil {
-			glog.Errorf("acquire vip failed for service %s", svc)
+			glog.Errorf("acquire vip failed for service %s", value)
 			return fmt.Errorf("error when acquire vip: %s", err)
 		}
 		cfm.Data[constants.BindIP] = bindIp
+
+		// lvs_method
+		_, ok = cfm.Data[constants.LvsMethod]
+		if !ok {
+			cfm.Data[constants.LvsMethod] = "NAT"
+		}
 		_, err = ipvsc.client.ConfigMaps(cfm.GetObjectMeta().GetNamespace()).Update(cfm)
 		glog.Errorf("updata configmap failed: %s", err)
 		return err
 	}
 
-	// reload
+	// add configmap with bind ip
 	bindIP := cfm.Data[constants.BindIP]
 	VIPs, err := ipvsc.getService(cfm)
 	err = ipvsc.keepalived.AddVIPs(bindIP, VIPs)
@@ -289,7 +289,7 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 				if err != nil {
 					return err
 				}
-				err = restore_vip(old_bind_ip)
+				err = release_vip(old_bind_ip)
 				if err != nil {
 					glog.Errorf("error to restore vip: %s", old_bind_ip)
 				}
@@ -328,7 +328,7 @@ func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) e
 		if err != nil {
 			return err
 		}
-		err = restore_vip(vip)
+		err = release_vip(vip)
 		if err != nil {
 			glog.Errorf("error to restore vip: %s", vip)
 		}
@@ -372,10 +372,7 @@ func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
 		return err
 	}
 
-	// on create configmap, bind_ip is not set
-	err = ipvsc.OnSyncConfigmap(oldCM)
-	if err != nil {
-		ipvsc.updateConfigMapStatusBindIP(err.Error(), "", oldCM)
-	}
+	// on create configmap
+	err = ipvsc.OnAddConfigmap(oldCM)
 	return err
 }

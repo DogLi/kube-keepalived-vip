@@ -53,9 +53,9 @@ var (
 	vrid           int
 	showVersion    bool
 
-	_version_ = ""
-	_branch_ = ""
-	_commitId_ = ""
+	_version_   = ""
+	_branch_    = ""
+	_commitId_  = ""
 	_buildTime_ = ""
 )
 
@@ -99,7 +99,6 @@ func init() {
 }
 
 func main() {
-
 
 	if showVersion {
 		glog.Infof("Version: %s\nBranch: %s\nCommit id: %s\nBuild time: %s\n",

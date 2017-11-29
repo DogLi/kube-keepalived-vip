@@ -33,12 +33,12 @@ type Queue struct {
 	// queue is the work queue the worker polls
 	queue workqueue.RateLimitingInterface
 	// sync is called for each item in the queue
-	sync func(interface {}) error
+	sync func(interface{}) error
 	// workerDone is closed when the worker exits
 	workerDone chan bool
 }
 
-func (r *Queue) handleErr(err error, obj interface {}) {
+func (r *Queue) handleErr(err error, obj interface{}) {
 	if err == nil {
 		// Forget about the #AddRateLimited history of the key on every successful synchronization.
 		// This ensures that future processing of updates for this key is not delayed because of
@@ -63,7 +63,6 @@ func (r *Queue) handleErr(err error, obj interface {}) {
 	// Report that, even after several retries, we could not successfully process this key
 	glog.Infof("dropping restore request (%v) out of the queue: %v", obj, err)
 }
-
 
 // Run ...
 func (t *Queue) Run(period time.Duration, stopCh <-chan struct{}) {
@@ -121,12 +120,12 @@ func (t *Queue) IsShuttingDown() bool {
 
 // NewTaskQueue creates a new task queue with the given sync function.
 // The sync function is called for every element inserted into the queue.
-func NewTaskQueue(syncFn func(interface {}) error) *Queue {
+func NewTaskQueue(syncFn func(interface{}) error) *Queue {
 	return NewCustomTaskQueue(syncFn, nil)
 }
 
 // NewCustomTaskQueue ...
-func NewCustomTaskQueue(syncFn func(interface {}) error, fn func(interface{}) (interface{}, error)) *Queue {
+func NewCustomTaskQueue(syncFn func(interface{}) error, fn func(interface{}) (interface{}, error)) *Queue {
 	q := &Queue{
 		queue:      workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		sync:       syncFn,

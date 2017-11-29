@@ -17,7 +17,6 @@ limitations under the License.
 package controller
 
 import (
-
 	"reflect"
 	//"sort"
 	"sync"
@@ -42,11 +41,11 @@ import (
 	"github.com/aledbf/kube-keepalived-vip/pkg/store"
 	"github.com/aledbf/kube-keepalived-vip/pkg/task"
 	//"github.com/aledbf/kube-keepalived-vip/utils"
+	"fmt"
+	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	"fmt"
-	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 )
 
 const (
@@ -133,13 +132,11 @@ type ipvsControllerController struct {
 
 	shutdown bool
 
-	endpointSyncQueue    *task.Queue
+	endpointSyncQueue  *task.Queue
 	configmapSyncQueue *task.Queue
 
-	stopCh    chan struct{}
+	stopCh chan struct{}
 }
-
-
 
 // NewIPVSController creates a new controller from the given config.
 func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) *ipvsControllerController {
@@ -240,7 +237,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	ipvsc.indexer, ipvsc.mapController = cache.NewIndexerInformer(
 		&cache.ListWatch{
 			ListFunc:  configMapListFunc(kubeClient, namespace, configmapLabel),
-			WatchFunc: configMapWatchFunc(kubeClient, namespace,configmapLabel),
+			WatchFunc: configMapWatchFunc(kubeClient, namespace, configmapLabel),
 		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler, cache.Indexers{})
 
@@ -260,7 +257,6 @@ func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelValue string) f
 		return c.ConfigMaps(ns).Watch(options)
 	}
 }
-
 
 // start the loadbalancer controller.
 func (ipvsc *ipvsControllerController) Start() {
@@ -314,24 +310,6 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	return err
 }
 
-func (ipvsc *ipvsControllerController) updateConfigMapStatusBindIP(errMessage string, bindIP string, configMap *apiv1.ConfigMap) {
-	configMapData := configMap.Data
-
-	//set status
-	if errMessage != "" {
-		configMapData["status"] = "ERROR : " + errMessage
-		delete(configMapData, "bind-ip")
-	} else if bindIP != "" {
-		configMapData["status"] = "SUCCESS"
-		configMapData[constants.BindIP] = bindIP
-	}
-
-	_, err := ipvsc.client.ConfigMaps(configMap.Namespace).Update(configMap)
-	if err != nil {
-		glog.Errorf("Error updating ConfigMap Status : %v", err)
-	}
-}
-
 func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
 	name := fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
 	Services := ipvsc.keepalived.Services
@@ -344,7 +322,7 @@ func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
 }
 
 func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
-	indexes := [] string {constants.TargetService, constants.BindIP, constants.LvsMethod}
+	indexes := []string{constants.TargetService, constants.BindIP, constants.LvsMethod}
 	for _, index := range indexes {
 		if CM1.Data[index] != CM2.Data[index] {
 			return false

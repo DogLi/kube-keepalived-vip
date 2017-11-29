@@ -13,4 +13,3 @@ const (
 	KeepalivedTmpl = "keepalived.tmpl"
 	HaproxyTmpl    = "haproxy.tmpl"
 )
-

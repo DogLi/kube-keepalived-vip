@@ -28,12 +28,11 @@ import (
 	"github.com/golang/glog"
 
 	"bytes"
+	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 	"k8s.io/kubernetes/pkg/util/iptables"
 	k8sexec "k8s.io/utils/exec"
 	"sort"
-	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 )
-
 
 var keepaliveMutex sync.Mutex
 
@@ -47,7 +46,7 @@ type keepalived struct {
 	useUnicast     bool
 	started        bool
 	VIPs           []vip
-	Services       map [string]string
+	Services       map[string]string
 	keepalivedTmpl *template.Template
 	haproxyTmpl    *template.Template
 	cmd            *exec.Cmd
@@ -97,8 +96,9 @@ func (k *keepalived) WriteCfg() error {
 	var buffer bytes.Buffer
 	k.keepalivedTmpl.Execute(&buffer, conf)
 	content := buffer.String()
-	glog.Infof("XXXXXXXXXXXXX  VIPs:   %s", VIPs)
-	glog.Infof("============ content:\n%s", content)
+	glog.V(2).Infof("VIPs:   %s", VIPs)
+	glog.V(2).Infof("Services: %s", k.Services)
+	glog.V(2).Infof("content:\n%s", content)
 
 	if k.proxyMode {
 		w, err := os.Create(constants.HaproxyCfg)
@@ -183,7 +183,7 @@ func (k *keepalived) Reload() error {
 }
 
 // Stop keepalived process
-func (k *keepalived) Stop() error{
+func (k *keepalived) Stop() error {
 	vips := k.getVIPs()
 	for _, vip := range vips {
 		k.removeVIP(vip)
@@ -227,7 +227,7 @@ func (k *keepalived) DeleteVIP(v string) error {
 	return err
 }
 
-// AddVIP removes a VIP from the keepalived config
+// AddVIP add a VIP from the keepalived config
 func (k *keepalived) AddVIPs(bindIP string, VIPs []vip) error {
 
 	glog.Infof("add vips to keepalived: %s: %s", bindIP, VIPs)
