@@ -310,16 +310,6 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	return err
 }
 
-func (ipvsc *ipvsControllerController) INKeepalived(obj metav1.Object) bool {
-	name := fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
-	Services := ipvsc.keepalived.Services
-	for _, value := range Services {
-		if name == value {
-			return true
-		}
-	}
-	return false
-}
 
 func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
 	indexes := []string{constants.TargetService, constants.BindIP, constants.LvsMethod}

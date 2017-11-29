@@ -338,10 +338,22 @@ func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) e
 	return nil
 }
 
+
+func (ipvsc *ipvsControllerController) ObjectFilter(obj metav1.Object) bool {
+	name := fmt.Sprintf("%v/%v", obj.GetNamespace(), obj.GetName())
+	Services := ipvsc.keepalived.Services
+	for _, value := range Services {
+		if name == value {
+			return true
+		}
+	}
+	return false
+}
+
 func (ipvsc *ipvsControllerController) sync(obj interface{}) error {
 	objMeta, err := meta.Accessor(obj)
 	if err == nil {
-		if ipvsc.INKeepalived(objMeta) {
+		if ipvsc.ObjectFilter(objMeta) {
 			configMapMutex.Lock()
 			defer configMapMutex.Unlock()
 			err := ipvsc.freshKeepalivedConf()
