@@ -30,7 +30,6 @@ func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.Con
 
 func (ipvsc *ipvsControllerController) getConfigMaps() []*apiv1.ConfigMap {
 	objs := ipvsc.indexer.List()
-	glog.Info("CCCCCCCCCCCCCCCC get configmap length: %s", len(objs))
 	configmaps := []*apiv1.ConfigMap{}
 	for _, obj := range objs {
 		configmaps = append(configmaps, obj.(*apiv1.ConfigMap))
@@ -233,6 +232,8 @@ func (ipvsc *ipvsControllerController) reload() error {
 }
 
 func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) error {
+	configMapMutex.Lock()
+	defer configMapMutex.Unlock()
 	cfm = cfm.DeepCopy()
 	cmData := cfm.Data
 	svc := cmData[constants.TargetService]
@@ -262,6 +263,8 @@ func (ipvsc *ipvsControllerController) OnSyncConfigmap(cfm *apiv1.ConfigMap) err
 }
 
 func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) error {
+	configMapMutex.Lock()
+	defer configMapMutex.Unlock()
 	oldCM := old.(*apiv1.ConfigMap)
 	curCM := cur.(*apiv1.ConfigMap)
 	if configmapsEqual(oldCM, curCM) {
@@ -272,7 +275,7 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 	old_bind_ip, ok := oldCM.Data[constants.BindIP]
 	if !ok {
 		// if the oldCM does'nt have bind_ip and current bind_ip has bind_ip, update it
-		ipvsc.cfmsyncQueue.Enqueue(cur)
+		ipvsc.configmapSyncQueue.Enqueue(cur)
 		return nil
 	} else {
 		cur_bind_ip, ok := curCM.Data[constants.BindIP]
@@ -291,7 +294,7 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 					glog.Errorf("error to restore vip: %s", old_bind_ip)
 				}
 				// release old_bind_ip
-				ipvsc.cfmsyncQueue.Enqueue(cur)
+				ipvsc.configmapSyncQueue.Enqueue(cur)
 				return nil
 			}
 		} else {
@@ -315,6 +318,8 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 }
 
 func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) error {
+	configMapMutex.Lock()
+	defer configMapMutex.Unlock()
 	delete(ipvsc.keepalived.Services, fmt.Sprintf("%s/%s", cfm.GetNamespace(), cfm.GetName()))
 	cmData := cfm.Data
 	vip, ok := cmData[constants.BindIP]
@@ -337,7 +342,8 @@ func (ipvsc *ipvsControllerController) sync(obj interface{}) error {
 	objMeta, err := meta.Accessor(obj)
 	if err == nil {
 		if ipvsc.INKeepalived(objMeta) {
-			glog.Infof("SSSSSSSSSSSSSS: %s", obj)
+			configMapMutex.Lock()
+			defer configMapMutex.Unlock()
 			err := ipvsc.freshKeepalivedConf()
 			if err == nil {
 				err = ipvsc.reload()

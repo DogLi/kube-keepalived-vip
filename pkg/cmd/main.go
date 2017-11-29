@@ -51,6 +51,12 @@ var (
 	configmapLabel string
 	proxyMode      bool
 	vrid           int
+	showVersion    bool
+
+	_version_ = ""
+	_branch_ = ""
+	_commitId_ = ""
+	_buildTime_ = ""
 )
 
 func init() {
@@ -84,12 +90,22 @@ func init() {
       keepalived sets) running on the same network.`)
 
 	flag.StringVar(&configmapLabel, "labelValue", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
+
+	flag.BoolVar(&showVersion, "show-version", false,
+		`show the version`)
+
+	flag.Parse()
+	flag.Set("logtostderr", "true")
 }
 
 func main() {
-	flag.Parse()
 
-	flag.Set("logtostderr", "true")
+
+	if showVersion {
+		glog.Infof("Version: %s\nBranch: %s\nCommit id: %s\nBuild time: %s\n",
+			_version_, _branch_, _commitId_, _buildTime_)
+		return
+	}
 
 	if vrid < 0 || vrid > 255 {
 		glog.Fatalf("Error using VRID %d, only values between 0 and 255 are allowed.", vrid)

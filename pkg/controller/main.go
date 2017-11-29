@@ -133,8 +133,8 @@ type ipvsControllerController struct {
 
 	shutdown bool
 
-	syncQueue    *task.Queue
-	cfmsyncQueue *task.Queue
+	endpointSyncQueue    *task.Queue
+	configmapSyncQueue *task.Queue
 
 	stopCh    chan struct{}
 }
@@ -187,8 +187,8 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		proxyMode:  proxyMode,
 	}
 
-	ipvsc.cfmsyncQueue = task.NewTaskQueue(ipvsc.syncConfigmap)
-	ipvsc.syncQueue = task.NewTaskQueue(ipvsc.sync)
+	ipvsc.configmapSyncQueue = task.NewTaskQueue(ipvsc.syncConfigmap)
+	ipvsc.endpointSyncQueue = task.NewTaskQueue(ipvsc.sync)
 
 	err = ipvsc.keepalived.loadTemplates()
 	if err != nil {
@@ -198,11 +198,11 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 	mapEventHandler := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			glog.Info("add configmap")
-			ipvsc.cfmsyncQueue.Enqueue(obj)
+			ipvsc.configmapSyncQueue.Enqueue(obj)
 		},
 		DeleteFunc: func(obj interface{}) {
 			glog.Info("delete configmap")
-			ipvsc.cfmsyncQueue.Enqueue(obj)
+			ipvsc.configmapSyncQueue.Enqueue(obj)
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if !reflect.DeepEqual(old, cur) {
@@ -217,14 +217,14 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 
 	eventHandlers := cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			ipvsc.syncQueue.Enqueue(obj)
+			ipvsc.endpointSyncQueue.Enqueue(obj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			ipvsc.syncQueue.Enqueue(obj)
+			ipvsc.endpointSyncQueue.Enqueue(obj)
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if !reflect.DeepEqual(old, cur) {
-				ipvsc.syncQueue.Enqueue(cur)
+				ipvsc.endpointSyncQueue.Enqueue(cur)
 			}
 		},
 	}
@@ -266,10 +266,10 @@ func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelValue string) f
 func (ipvsc *ipvsControllerController) Start() {
 	go ipvsc.epController.Run(ipvsc.stopCh)
 	go ipvsc.svcController.Run(ipvsc.stopCh)
-	go ipvsc.syncQueue.Run(time.Second, ipvsc.stopCh)
+	go ipvsc.endpointSyncQueue.Run(time.Second, ipvsc.stopCh)
 
 	go ipvsc.mapController.Run(ipvsc.stopCh)
-	go ipvsc.cfmsyncQueue.Run(time.Second, ipvsc.stopCh)
+	go ipvsc.configmapSyncQueue.Run(time.Second, ipvsc.stopCh)
 
 	go handleSigterm(ipvsc)
 
@@ -300,15 +300,15 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	defer ipvsc.stopLock.Unlock()
 
 	close(ipvsc.stopCh)
-	if !ipvsc.syncQueue.IsShuttingDown() {
+	if !ipvsc.endpointSyncQueue.IsShuttingDown() {
 		glog.Infof("shutting down controller sync queues")
-		go ipvsc.syncQueue.Shutdown()
+		go ipvsc.endpointSyncQueue.Shutdown()
 
 	}
 
-	if !ipvsc.cfmsyncQueue.IsShuttingDown() {
+	if !ipvsc.configmapSyncQueue.IsShuttingDown() {
 		glog.Infof("shutting down controller configmap sysnc queues")
-		go ipvsc.cfmsyncQueue.Shutdown()
+		go ipvsc.configmapSyncQueue.Shutdown()
 	}
 	err := ipvsc.keepalived.Stop()
 	return err

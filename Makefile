@@ -4,14 +4,15 @@ all: push
 TAG = 0.1
 PREFIX = 10.10.20.3:5000/ylf/kube-keepalived-vip
 BUILD_IMAGE = build-keepalived
-PKG = github.com/aledbf/kube-keepalived-vip
+PKG = .
 
 GO_LIST_FILES=$(shell go list ${PKG}/... | grep -v vendor)
 
 controller: clean
-	CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -ldflags '-s -w' \
+	python rootfs/build.py \
+	-v ${TAG} \
 	-o rootfs/kube-keepalived-vip \
-	${PKG}/pkg/cmd
+	-s ${PKG}/pkg/cmd
 
 .PHONY: build
 build:
