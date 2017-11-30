@@ -124,6 +124,7 @@ type ipvsControllerController struct {
 	keepalived        *keepalived
 
 	ruMD5 string
+	watchNamespace string
 
 	// stopLock is used to enforce only a single call to Stop is active.
 	// Needed because we allow stopping through an http endpoint and
@@ -144,6 +145,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		client:            kubeClient,
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
 		stopCh:            make(chan struct{}),
+		watchNamespace: namespace,
 	}
 
 	podInfo, err := k8s.GetPodDetails(kubeClient)
@@ -182,6 +184,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		ipt:        iptInterface,
 		vrid:       vrid,
 		proxyMode:  proxyMode,
+		Services: make(map[string]string),
 	}
 
 	ipvsc.configmapSyncQueue = task.NewTaskQueue(ipvsc.syncConfigmap)
@@ -203,12 +206,8 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUn
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			if !reflect.DeepEqual(old, cur) {
-				glog.Infof("update configmap, old configmap and current configmap are not equal")
 				ipvsc.OnUpdateConfigmap(old, cur)
-			} else {
-				glog.Info("updata configmap, old configmap and currentconfigmap are equal")
 			}
-
 		},
 	}
 

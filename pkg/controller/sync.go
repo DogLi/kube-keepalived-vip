@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
+	"k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/api/errors"
 )
 
 func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.ConfigMap, error) {
@@ -115,7 +116,11 @@ func (ipvsc *ipvsControllerController) getService(cm *apiv1.ConfigMap) ([]vip, e
 	svcs := []vip{}
 
 	cmData := cm.Data
-	bind_ip := cmData[constants.BindIP]
+	bind_ip, ok := cmData[constants.BindIP]
+	if !ok {
+		glog.Warningf("There is no VIP in configmap: %s", cm.GetName())
+		return svcs, nil
+	}
 	svc := cmData[constants.TargetService]
 	ns, ok := cmData[constants.TargetNamespace]
 	if !ok {
@@ -214,13 +219,29 @@ func (ipvsc *ipvsControllerController) reload() error {
 }
 
 func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) error {
-	cfm = cfm.DeepCopy()
 	configMapMutex.Lock()
 	defer configMapMutex.Unlock()
-	cmData := cfm.Data
-	_, ok := cmData[constants.BindIP]
+
+	cfm = cfm.DeepCopy()
+
+	// check if the vip is set by other keepalived
+	curConfigmap, err := ipvsc.getConfigMap(cfm.GetNamespace(), cfm.GetName())
+	if err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	ipvsc.indexer.Resync()
+	_, curOk := curConfigmap.Data[constants.BindIP]
+	_, oldOk := cfm.Data[constants.BindIP]
+	glog.Info("in OnAddConfigmap.........")
+	if !oldOk && curOk {
+		glog.Info("VIP is set by others!")
+		return nil
+	} else {
+		glog.Info("configmap is not set VIP, so I'll set it!")
+	}
+
 	// add configmap without bind ip
-	if !ok {
+	if !oldOk {
 		// name & namespace
 		targetService := cfm.Data[constants.TargetService]
 		targetNamespace, ok := cfm.Data[constants.TargetNamespace]
@@ -232,8 +253,9 @@ func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) erro
 		value := fmt.Sprintf("%s/%s", targetNamespace, targetService)
 		ipvsc.keepalived.Services[key] = value
 
-		// bind ip
-		bindIp, err := acquire_vip()
+		// get vip from zstack
+		bindIp, err := ipvsc.AcquireVip()
+
 		if err != nil {
 			glog.Errorf("acquire vip failed for service %s", value)
 			return fmt.Errorf("error when acquire vip: %s", err)
@@ -246,7 +268,11 @@ func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) erro
 			cfm.Data[constants.LvsMethod] = "NAT"
 		}
 		_, err = ipvsc.client.ConfigMaps(cfm.GetObjectMeta().GetNamespace()).Update(cfm)
-		glog.Errorf("updata configmap failed: %s", err)
+		// update failed, because other keepalived may update it!
+		if err != nil {
+			glog.Errorf("updata configmap failed: %s", err)
+			ipvsc.ReleaseVip(bindIp)
+		}
 		return err
 	}
 
@@ -268,9 +294,10 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 	oldCM := old.(*apiv1.ConfigMap)
 	curCM := cur.(*apiv1.ConfigMap)
 	if configmapsEqual(oldCM, curCM) {
+		glog.Infof("update configmap, old configmap and current configmap are equal")
 		return nil
 	}
-	glog.Infof("old configmap data: %v, current configmap data: %v", oldCM.Data, curCM.Data)
+	glog.Infof("update configmap, old configmap data: %v, current configmap data: %v", oldCM.Data, curCM.Data)
 
 	old_bind_ip, ok := oldCM.Data[constants.BindIP]
 	if !ok {
@@ -289,7 +316,7 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 				if err != nil {
 					return err
 				}
-				err = release_vip(old_bind_ip)
+				err = ipvsc.ReleaseVip(old_bind_ip)
 				if err != nil {
 					glog.Errorf("error to restore vip: %s", old_bind_ip)
 				}
@@ -328,7 +355,7 @@ func (ipvsc *ipvsControllerController) OnDeleteConfigmap(cfm *apiv1.ConfigMap) e
 		if err != nil {
 			return err
 		}
-		err = release_vip(vip)
+		err = ipvsc.ReleaseVip(vip)
 		if err != nil {
 			glog.Errorf("error to restore vip: %s", vip)
 		}
@@ -378,6 +405,7 @@ func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
 	glog.Infof("in sync configmap %s, data: %s", oldCM.Name, cmData)
 	// on delete configmap
 	if err != nil {
+		glog.Infof("sync: delete configmap ...")
 		if apierrors.IsNotFound(err) {
 			err = ipvsc.OnDeleteConfigmap(oldCM)
 		}

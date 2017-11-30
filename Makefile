@@ -8,6 +8,7 @@ PKG = .
 
 GO_LIST_FILES=$(shell go list ${PKG}/... | grep -v vendor)
 
+.PHONY: controller
 controller: clean
 	python rootfs/build.py \
 	-v ${TAG} \

@@ -1,12 +1,17 @@
 package controller
 
 import (
+	"sync"
+	"time"
 	"github.com/golang/glog"
 	"math/rand"
-	"time"
 )
 
-func acquire_vip() (string, error) {
+var ipMutex sync.Mutex
+
+func (ipvsc *ipvsControllerController) AcquireVip() (string, error) {
+	ipMutex.Lock()
+	defer ipMutex.Unlock()
 	ips := []string{"61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73"}
 	rand.Seed(time.Now().Unix())
 	n := rand.Int() % len(ips)
@@ -17,7 +22,7 @@ func acquire_vip() (string, error) {
 	return ip, nil
 }
 
-func release_vip(vip string) error {
+func (ipvsc *ipvsControllerController)ReleaseVip(vip string) error {
 	glog.Infof("return back the ip {}", vip)
 	return nil
 }

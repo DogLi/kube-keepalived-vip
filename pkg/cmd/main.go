@@ -142,8 +142,13 @@ func main() {
 
 	ipvsc := controller.NewIPVSController(kubeClient, watchNamespace, useUnicast, configmapLabel, vrid, proxyMode)
 
+	if err != nil {
+		glog.Fatalf("failed to get hostname: %v", err)
+	}
+
 	ipvsc.Start()
 }
+
 
 const (
 	// High enough QPS to fit all expected use cases. QPS=0 is not set here, because

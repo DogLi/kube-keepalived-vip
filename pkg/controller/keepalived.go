@@ -92,13 +92,13 @@ func (k *keepalived) WriteCfg() error {
 		return err
 	}
 
-	// TODO: just for debug
+	// just for debug
 	var buffer bytes.Buffer
 	k.keepalivedTmpl.Execute(&buffer, conf)
 	content := buffer.String()
-	glog.V(2).Infof("VIPs:   %s", VIPs)
-	glog.V(2).Infof("Services: %s", k.Services)
-	glog.V(2).Infof("content:\n%s", content)
+	glog.Infof("VIPs:   %s", VIPs)
+	glog.Infof("Services: %s", k.Services)
+	glog.Infof("content:\n%s", content)
 
 	if k.proxyMode {
 		w, err := os.Create(constants.HaproxyCfg)
