@@ -232,7 +232,6 @@ func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) erro
 	ipvsc.indexer.Resync()
 	_, curOk := curConfigmap.Data[constants.BindIP]
 	_, oldOk := cfm.Data[constants.BindIP]
-	glog.Info("in OnAddConfigmap.........")
 	if !oldOk && curOk {
 		glog.Info("VIP is set by others!")
 		return nil
