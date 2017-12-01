@@ -124,7 +124,6 @@ type ipvsControllerController struct {
 	keepalived        *keepalived
 
 	ruMD5 string
-	watchNamespace string
 
 	// stopLock is used to enforce only a single call to Stop is active.
 	// Needed because we allow stopping through an http endpoint and
@@ -140,14 +139,13 @@ type ipvsControllerController struct {
 }
 
 // NewIPVSController creates a new controller from the given config.
-func NewIPVSController(kubeClient *kubernetes.Clientset, namespace string, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) *ipvsControllerController {
+func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) *ipvsControllerController {
 	ipvsc := ipvsControllerController{
 		client:            kubeClient,
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
 		stopCh:            make(chan struct{}),
-		watchNamespace: namespace,
 	}
-
+	namespace :=  apiv1.NamespaceAll
 	podInfo, err := k8s.GetPodDetails(kubeClient)
 	if err != nil {
 		glog.Fatalf("Error getting POD information: %v", err)

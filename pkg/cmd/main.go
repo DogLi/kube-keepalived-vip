@@ -24,7 +24,6 @@ import (
 
 	"github.com/golang/glog"
 
-	apiv1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -45,9 +44,7 @@ var (
 	}
 	apiserverHost  string
 	kubeConfigFile string
-	watchNamespace string
 	useUnicast     bool
-	configMapName  string
 	configmapLabel string
 	proxyMode      bool
 	vrid           int
@@ -67,17 +64,8 @@ func init() {
 
 	flag.StringVar(&kubeConfigFile, "kubeconfig", "", "Path to kubeconfig file with authorization and master location information.")
 
-	flag.StringVar(&watchNamespace, "watch-namespace", apiv1.NamespaceAll,
-		`Namespace to watch for Ingress. Default is to watch all namespaces`)
-
 	flag.BoolVar(&useUnicast, "use-unicast", false, `use unicast instead of multicast for communication
 		with other keepalived instances`)
-
-	flag.StringVar(&configMapName, "services-configmap", "",
-		`Name of the ConfigMap that contains the definition of the services to expose.
-		The key in the map indicates the external IP to use. The value is the name of the
-		service with the format namespace/serviceName and the port of the service could be a number or the
-		name of the port.`)
 
 	flag.BoolVar(&proxyMode, "proxy-protocol-mode", false, `If true, it will use keepalived to announce the virtual
 		IP address/es and HAProxy with proxy protocol to forward traffic to the endpoints.
@@ -89,7 +77,7 @@ func init() {
       RFC-5798), which must be different for every Virtual Router (ie. every
       keepalived sets) running on the same network.`)
 
-	flag.StringVar(&configmapLabel, "labelValue", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
+	flag.StringVar(&configmapLabel, "label-value", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
 
 	flag.BoolVar(&showVersion, "show-version", false,
 		`show the version`)
@@ -140,7 +128,7 @@ func main() {
 
 	glog.Info("starting LVS configuration")
 
-	ipvsc := controller.NewIPVSController(kubeClient, watchNamespace, useUnicast, configmapLabel, vrid, proxyMode)
+	ipvsc := controller.NewIPVSController(kubeClient, useUnicast, configmapLabel, vrid, proxyMode)
 
 	if err != nil {
 		glog.Fatalf("failed to get hostname: %v", err)
