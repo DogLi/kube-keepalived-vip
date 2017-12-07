@@ -96,7 +96,7 @@ func (k *keepalived) WriteCfg() error {
 	var buffer bytes.Buffer
 	k.keepalivedTmpl.Execute(&buffer, conf)
 	content := buffer.String()
-	glog.Infof("VIPs:   %s", VIPs)
+	glog.Infof("ip: %s, VIPs:   %s",k.ip, VIPs)
 	glog.Infof("Services: %s", k.Services)
 	glog.Infof("content:\n%s", content)
 

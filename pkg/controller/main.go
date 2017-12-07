@@ -46,6 +46,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	"os"
 )
 
 const (
@@ -122,6 +123,7 @@ type ipvsControllerController struct {
 
 	reloadRateLimiter flowcontrol.RateLimiter
 	keepalived        *keepalived
+	zstack            *ZStack
 
 	ruMD5 string
 
@@ -139,7 +141,7 @@ type ipvsControllerController struct {
 }
 
 // NewIPVSController creates a new controller from the given config.
-func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) *ipvsControllerController {
+func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, configmapLabel string, vrid int, proxyMode bool) (*ipvsControllerController, error) {
 	ipvsc := ipvsControllerController{
 		client:            kubeClient,
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
@@ -238,7 +240,11 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler, cache.Indexers{})
 
-	return &ipvsc
+	urlString := os.Getenv("RABBITMQ")
+	zstack := NewZstack(urlString)
+	ipvsc.zstack = zstack
+	zstack.Connect()
+	return &ipvsc, nil
 }
 
 func configMapListFunc(c *kubernetes.Clientset, ns string, labelValue string) func(metav1.ListOptions) (runtime.Object, error) {
@@ -303,6 +309,7 @@ func (ipvsc *ipvsControllerController) Stop() error {
 		glog.Infof("shutting down controller configmap sysnc queues")
 		go ipvsc.configmapSyncQueue.Shutdown()
 	}
+	ipvsc.zstack.Close()
 	err := ipvsc.keepalived.Stop()
 	return err
 }

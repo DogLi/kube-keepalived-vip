@@ -2,59 +2,111 @@ package controller
 
 import (
 	"bytes"
+	"crypto/sha512"
+	"encoding/hex"
 	"fmt"
-	"github.com/golang/glog"
-	"github.com/streadway/amqp"
 	"github.com/bitly/go-simplejson"
-	"math/rand"
+	"github.com/golang/glog"
+	"github.com/satori/go.uuid"
+	"github.com/streadway/amqp"
 	"strings"
 	"sync"
 	"time"
-	"github.com/satori/go.uuid"
-	"encoding/hex"
-	"crypto/sha512"
 )
 
 var ipMutex sync.Mutex
 
-var ipPool = []string{"61", "62", "63", "64", "65", "66", "67", "68", "69", "70", "71", "72", "73"}
+func (self *ZStack) BuildData() amqp.Publishing {
+	msgId := newUuid()
+	jsonStr := fmt.Sprintf(`{
+"org.zstack.header.ecfs.APIQueryEcfsHealthMsg":
+{"headers": {
+		"replyTo": "%s",
+		"noReply": "false",
+		"correlationId": "%s"
+	},
+"serviceId": "api.portal",
+"session": {"uuid": "%s"},
+"id": "%s"}
+}
+`, self.replyQueueName, msgId, self.session.token, msgId)
+	glog.Infof("Build message: %s", jsonStr)
+	msg := self.encodeMessage(msgId, jsonStr)
+	return msg
+}
 
 func (ipvsc *ipvsControllerController) AcquireVip() (string, error) {
-	ipMutex.Lock()
-	defer ipMutex.Unlock()
-	rand.Seed(time.Now().UnixNano())
-	index := rand.Intn(10)
-	ipTail := ipPool[index]
-	ipPool = append(ipPool[:index], ipPool[index+1:]...)
-	ip := "10.10.40." + ipTail
-
-	//ip = "10.10.40.61"
-	glog.Info("get IP from zstack(%s): %s", ipPool, ip)
+	msgId := newUuid()
+	localIp := ipvsc.keepalived.ip
+	localMask := ipvsc.keepalived.netmask
+	jsonStr := fmt.Sprintf(`{
+"org.zstack.header.ecfs.APIQueryEcfsHealthMsg":
+{"headers": {
+		"replyTo": "%s",
+		"noReply": "false",
+		"correlationId": "%s"
+	},
+"serviceId": "api.portal",
+"session": {"uuid": "%s"},
+"id": "%s",
+"localip": "%s",
+"localMask": "%s",
+"type": "GetIP"
+}
+}`, ipvsc.zstack.replyQueueName, msgId, ipvsc.zstack.session.token, msgId, localIp, localMask)
+	ipvsc.zstack.UpdateSession()
+	msg := ipvsc.zstack.encodeMessage(msgId, jsonStr)
+	// TODO: get ip
+	jsonResult, err := ipvsc.zstack.SendMsg(msg)
+	if err != nil {
+		glog.Errorf("failed to get ip from zstack: %s", err)
+	}
+	glog.Infof("jsonResult: %s", jsonResult)
+	ip := "10.10.40.44"
 	return ip, nil
 }
 
 func (ipvsc *ipvsControllerController) ReleaseVip(vip string) error {
-	glog.Infof("return back the ip {}", vip)
-	glog.Infof("ip pool: %s", ipPool)
-	ipTail := strings.SplitAfter(vip, ".")[3]
-	ipPool = append(ipPool, ipTail)
+	msgId := newUuid()
+	jsonStr := fmt.Sprintf(`{
+"org.zstack.header.ecfs.APIQueryEcfsHealthMsg":
+{"headers": {
+		"replyTo": "%s",
+		"noReply": "false",
+		"correlationId": "%s"
+	},
+"serviceId": "api.portal",
+"session": {"uuid": "%s"},
+"id": "%s",
+"ip": "%s",
+"type": "ReleaseIP"
+}
+}`, ipvsc.zstack.replyQueueName, msgId, ipvsc.zstack.session.token, msgId, vip)
+	ipvsc.zstack.UpdateSession()
+	msg := ipvsc.zstack.encodeMessage(msgId, jsonStr)
+	jsonResult, err := ipvsc.zstack.SendMsg(msg)
+	if err != nil{
+		glog.Errorf("Release vip %s failed: %s", vip, err)
+	}
+	// TODO: get the result from jsonResult
+	glog.Infof("%s", jsonResult)
 	return nil
 }
 
 var (
-	P2P_EXCHANGE                 = "P2P"
-	API_SERVICE_ID               = "zstack.message.api.portal"
-	QUEUE_PREFIX                 = "zstack.ui.message.%s"
+	P2P_EXCHANGE   = "P2P"
+	API_SERVICE_ID = "zstack.message.api.portal"
+	QUEUE_PREFIX   = "zstack.ui.message.%s"
 )
 
 type Session struct {
-	timeTag time.Time
-	available  bool
-	token   string
-	timeout time.Duration
+	timeTag   time.Time
+	available bool
+	token     string
+	timeout   time.Duration
 }
 
-type Connection struct {
+type ZStack struct {
 	uuid string
 	// a list of RabbitMQ url. A single url is in format of "
 	// "account:password@ip:port/virtual_host_name. Multiple urls are split by ','.
@@ -65,60 +117,70 @@ type Connection struct {
 	session        Session
 }
 
-func newUuid() string{
+func newUuid() string {
 	uuid := uuid.NewV4()
 	glog.Infof("create uuid: %s", uuid)
 	return uuid.String()
 }
-func NewConnection(urlString string) (Connection, error) {
-	urls := strings.Split(urlString, ",")
+func NewZstack(urlString string) *ZStack {
 	uuid := newUuid()
-	rmq := Connection {
-		urlStrings: urlString,
-		uuid: uuid,
-		P2P_EXCHANGE: P2P_EXCHANGE,
+	self := ZStack{
+		urlStrings:     urlString,
+		uuid:           uuid,
+		P2P_EXCHANGE:   P2P_EXCHANGE,
 		replyQueueName: fmt.Sprintf(QUEUE_PREFIX, uuid),
 	}
+	self.session = Session{
+		timeout:   2 * time.Hour,
+		available: false,
+	}
+
+	return &self
+}
+
+func (self *ZStack) Connect() error {
+	c := make(chan *amqp.Error)
+	urls := strings.Split(self.urlStrings, ",")
+	go func() {
+		err := <-c
+		glog.Infof("reconnect: %s", err.Error())
+		self.Connect()
+	}()
 	// connect to rabbitmq
-	err := fmt.Errorf("error to connect rabbitmq: %s", urls)
+	var err error
 	for _, url := range urls {
 		url := fmt.Sprintf("amqp://%s", url)
 		glog.Infof("connect to rabbitmq: %s", url)
-		rmq.conn, err = amqp.Dial(url)
+		self.conn, err = amqp.Dial(url)
 		if err == nil {
 			break
 		}
 	}
 
 	if err != nil {
-		return rmq, err
-	}
-
-	rmq.session = Session{
-		timeout: 2 * time.Hour,
-		available: false,
+		return err
 	}
 	// create queue
-	if err = rmq.createQueue(); err != nil {
-		return rmq, err
+	if err = self.createQueue(); err != nil {
+		return err
 	}
 	// get token
-	if err = rmq.UpdateSession(); err != nil {
-		return rmq, err
+	if err = self.UpdateSession(); err != nil {
+		return err
 	} else {
 		glog.Infof("update session success!")
 	}
-
-	return rmq, nil
+	self.conn.NotifyClose(c)
+	return nil
 }
 
-func (self *Connection) UpdateSession() error {
+func (self *ZStack) UpdateSession() error {
 	timeNow := time.Now()
 	if timeNow.Sub(self.session.timeTag) < self.session.timeout && self.session.available {
 		glog.Infof("session is avaliable, no need to update!")
 		return nil
 	}
-	msgId :=  newUuid()
+	msgId := newUuid()
 	user := "admin"
 	sha := sha512.New()
 	sha.Write([]byte("password"))
@@ -166,19 +228,19 @@ func (self *Connection) UpdateSession() error {
 	return nil
 }
 
-func (self *Connection) createQueue() error {
+func (self *ZStack) createQueue() error {
 	ch, err := self.conn.Channel()
 	if err != nil {
 		return err
 	}
 	// create queue
 	_, err = ch.QueueDeclare(
-		self.replyQueueName, // name
+		self.replyQueueName,          // name
 		false,               // durable
-		true,                // delete when unused
-		false,               // exclusive
-		false,               // no-wait
-		nil,                 // arguments
+		true,             // delete when unused
+		false,             // exclusive
+		false,                // no-wait
+		nil,                 	  // arguments
 	)
 	if err != nil {
 		return err
@@ -191,14 +253,21 @@ func (self *Connection) createQueue() error {
 	return err
 }
 
-func (self *Connection) SendMsg(msg amqp.Publishing) (*simplejson.Json, error) {
+func (self *ZStack) SendMsg(msg amqp.Publishing) (*simplejson.Json, error) {
 	channel, err := self.conn.Channel()
 	if err != nil {
 		glog.Errorf("get channel failed: %s", err)
 		return &simplejson.Json{}, err
 	}
 	// receive message
-	msgs, err := channel.Consume(self.replyQueueName, "", false, false, false, false, nil)
+	msgs, err := channel.Consume(
+		self.replyQueueName,
+		"",
+		false,
+		false,
+		false,
+		false,
+		nil)
 
 	// send message
 	err = channel.Publish(
@@ -224,49 +293,29 @@ func (self *Connection) SendMsg(msg amqp.Publishing) (*simplejson.Json, error) {
 
 	var result string
 
-	L:
-		for {
-			select {
-			case d := <-msgs:
-				glog.Infof("receive message: %s", d.Body)
-				if result, err = self.decodeMessage(d, msg); err == nil {
-					d.Ack(false)
-					break L
-				}
-			case <-timeout:
-				return &simplejson.Json{}, fmt.Errorf("get message from rabbitmq timeout!")
+L:
+	for {
+		select {
+		case d := <-msgs:
+			if result, err = self.decodeMessage(d, msg); err == nil {
+				d.Ack(false)
+				break L
 			}
+		case <-timeout:
+			return &simplejson.Json{}, fmt.Errorf("get message %s from rabbitmq timeout!", msg.CorrelationId)
 		}
+	}
 
 	js, err := simplejson.NewJson([]byte(result))
 	return js, err
 }
 
-func (self *Connection) Close() {
+func (self *ZStack) Close() {
 	self.conn.Close()
 }
 
-func (self *Connection) BuildData() amqp.Publishing {
-	msgId := newUuid()
-	jsonStr := fmt.Sprintf(`{
-"org.zstack.header.ecfs.APIQueryEcfsHealthMsg":
-{"headers": {
-		"replyTo": "%s",
-		"noReply": "false",
-		"correlationId": "%s"
-	},
-"serviceId": "api.portal",
-"session": {"uuid": "%s"},
-"id": "%s"}
-}
-`, self.replyQueueName, msgId, self.session.token, msgId)
-	glog.Infof("Build message: %s", jsonStr)
-	msg := self.encodeMessage(msgId, jsonStr)
-	return msg
-}
-
-
-func (rmq *Connection) decodeMessage(recive amqp.Delivery, msg amqp.Publishing) (string, error) {
+func (rmq *ZStack) decodeMessage(recive amqp.Delivery, msg amqp.Publishing) (string, error) {
+	glog.Infof("receive message %s : %s", recive.Headers["correlationId"], recive.Body)
 	if recive.Headers["correlationId"] == msg.Headers["correlationId"] {
 		// bytes to string
 		buffer := bytes.NewBuffer(recive.Body)
@@ -276,10 +325,10 @@ func (rmq *Connection) decodeMessage(recive amqp.Delivery, msg amqp.Publishing) 
 	return "", fmt.Errorf("correlationId not match")
 }
 
-func (rmq *Connection) encodeMessage(msgId, msgContent string) amqp.Publishing {
+func (rmq *ZStack) encodeMessage(msgId, msgContent string) amqp.Publishing {
 	data := amqp.Publishing{
-		ContentType: "application/json",
-		Body:        []byte(msgContent),
+		ContentType:   "application/json",
+		Body:          []byte(msgContent),
 		CorrelationId: msgId,
 	}
 	return data

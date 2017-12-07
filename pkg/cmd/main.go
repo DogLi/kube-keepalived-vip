@@ -128,10 +128,11 @@ func main() {
 
 	glog.Info("starting LVS configuration")
 
-	ipvsc := controller.NewIPVSController(kubeClient, useUnicast, configmapLabel, vrid, proxyMode)
+	ipvsc, err := controller.NewIPVSController(kubeClient, useUnicast, configmapLabel, vrid, proxyMode)
 
 	if err != nil {
-		glog.Fatalf("failed to get hostname: %v", err)
+		glog.Fatalf("failed to initial controller: %v", err)
+		handleFatalInitError(err)
 	}
 
 	ipvsc.Start()
@@ -202,6 +203,7 @@ func handleFatalInitError(err error) {
 	glog.Fatalf("Error while initializing connection to Kubernetes apiserver. "+
 		"This most likely means that the cluster is misconfigured (e.g., it has "+
 		"invalid apiserver certificates or service accounts configuration). Reason: %s\n", err)
+	panic(err)
 }
 
 // loadIPVModule load module require to use keepalived
