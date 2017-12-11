@@ -77,7 +77,7 @@ func init() {
       RFC-5798), which must be different for every Virtual Router (ie. every
       keepalived sets) running on the same network.`)
 
-	flag.StringVar(&configmapLabel, "label-value", "zstack", "watch the configmap with label configLabelKey: configLabelValue")
+	flag.StringVar(&configmapLabel, "loadbalancer", "zstack", "watch the configmap with label loadbalancer: balancer-platform")
 
 	flag.BoolVar(&showVersion, "show-version", false,
 		`show the version`)

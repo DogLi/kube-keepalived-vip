@@ -1,6 +1,11 @@
 apiVersion: v1
 kind: ConfigMap
-metadata:
-  name: vip-configmap
 data:
-  10.10.40.44: default/echoheaders
+  target-namespace: default
+  target-service: echoheaders
+metadata:
+  labels:
+    loadbalancer: zstack
+  name: vip-test
+  namespace: default
+

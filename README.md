@@ -3,25 +3,64 @@ Kubernetes Virtual IP address/es using [keepalived](http://www.keepalived.org)
 
 AKA "how to set up virtual IP addresses in kubernetes using [IPVS - The Linux Virtual Server Project](http://www.linuxvirtualserver.org/software/ipvs.html)".
 
-[![Build Status](https://travis-ci.org/aledbf/kube-keepalived-vip.svg?branch=master)](https://travis-ci.org/aledbf/kube-keepalived-vip)
-[![Coverage Status](https://coveralls.io/repos/github/aledbf/kube-keepalived-vip/badge.svg?branch=master)](https://coveralls.io/github/aledbf/kube-keepalived-vip)
-[![Go Report Card](https://goreportcard.com/badge/github.com/aledbf/kube-keepalived-vip)](https://goreportcard.com/report/github.com/aledbf/kube-keepalived-vip)
-
 
 ## Overview
 
 There are 2 ways to expose a service in the current kubernetes service model:
 
-- Create a cloud load balancer.
-- Allocate a port (the same port) on every node in your cluster and proxy traffic through that port to the endpoints.
+- **L4 LoadBalancer**: [Available only on cloud providers](https://kubernetes.io/docs/tasks/access-application-cluster/create-external-load-balancer/) such as GCE and AWS
+- **Service via NodePort**: The [NodePort directive](https://kubernetes.io/docs/concepts/services-networking/service/#type-nodeport) allocates a port on every worker node, which proxy the traffic to the respective Pod.
+- **L7 Ingress**: The [Ingress](https://kubernetes.io/docs/concepts/services-networking/ingress/) is a dedicated loadbalancer (eg. nginx, HAProxy, traefik, vulcand) that redirects incoming HTTP/HTTPS traffic to the respective endpoints
+
 
 This just works. What's the issue then?
 
-The issue is that it does not provide High Availability because beforehand is required to know the IP addresss of the node where is running and in case of a failure the pod can be be moved to a different node. Here is where ipvs could help.
+```
+                                                  ___________________
+                                                 |                   |
+                                           |-----| Host IP: 10.4.0.3 |
+                                           |     |___________________|
+                                           |
+                                           |      ___________________
+                                           |     |                   |
+Public ----(example.com = 10.4.0.3/4/5)----|-----| Host IP: 10.4.0.4 |
+                                           |     |___________________|
+                                           |
+                                           |      ___________________
+                                           |     |                   |
+                                           |-----| Host IP: 10.4.0.5 |
+                                                 |___________________|
+```
+
+The issue is that it does not provide High Availability because beforehand is required to know the IP addresss of the node where is running and in case of a failure the pod can be be moved to a different node.The sysadmin has to step in and delist the faulty node from `example.com`. Since there will be intermittent downtime until the sysadmin intervenes, this isn't true High Availability (HA). Here is where ipvs could help.
+
+```
+                                               ___________________
+                                              |                   |
+                                              | VIP: 10.4.0.50    |
+                                        |-----| Host IP: 10.4.0.3 |
+                                        |     | Role: Master      |
+                                        |     |___________________|
+                                        |
+                                        |      ___________________
+                                        |     |                   |
+                                        |     | VIP: Unassigned   |
+Public ----(example.com = 10.4.0.50)----|-----| Host IP: 10.4.0.3 |
+                                        |     | Role: Slave       |
+                                        |     |___________________|
+                                        |
+                                        |      ___________________
+                                        |     |                   |
+                                        |     | VIP: Unassigned   |
+                                        |-----| Host IP: 10.4.0.3 |
+                                              | Role: Slave       |
+                                              |___________________|
+```
+
 The idea is to define an IP address per service to expose it outside the Kubernetes cluster and use vrrp to announce this "mapping" in the local network.
 With 2 or more instance of the pod running in the cluster is possible to provide high availabity using a single IP address.
 
-##### What is the difference between this and [service-loadbalancer](https://github.com/kubernetes/contrib/tree/master/service-loadbalancer) or [nginx-alpha](https://github.com/kubernetes/contrib/tree/master/Ingress/controllers/nginx-alpha) to expose one or more services?
+### What is the difference between this and [service-loadbalancer](https://github.com/kubernetes/contrib/tree/master/service-loadbalancer) or [nginx-alpha](https://github.com/kubernetes/contrib/tree/master/Ingress/controllers/nginx-alpha) to expose one or more services?
 
 This should be considered a complement, not a replacement for HAProxy or nginx. The goal using keepalived is to provide high availability and to bring certainty about how an exposed service can be reached (beforehand we know the ip address independently of the node where is running). For instance keepalived can use used to expose the service-loadbalancer or nginx ingress controller in the LAN using one IP address.
 
@@ -32,13 +71,33 @@ This should be considered a complement, not a replacement for HAProxy or nginx. 
 
 
 ## Configuration
+To expose a service(`service-namespace/service-name`) with a `vip`, use a configmap which labled with `loadbalancer:zstack`, the value `zstack` is the default label value, which can be replaced with other name such as `--loadbalancer othername` when start the keepalived control.
 
-To expose one or more services use the flag `services-configmap`. The format of the data is: `external IP -> namespace/serviceName`. Optionally is possible to specify forwarding method using `:` after the service name. The valid options are `NAT`, `DR` and `PROXY`.
-For instance `external IP -> namespace/serviceName:DR`.
-If the method is not specified it will use NAT.
+The `Data` field of the configmap should be:
 
-This IP must be routable inside the LAN and must be available.
-By default the IP address of the pods are used to route the traffic. This means that is one pod dies or a new one is created by a scale event the keepalived configuration file will be updated and reloaded.
+```
+target-service: service-name
+target-namespace: service-namespace
+lvs-method: NAT
+vip: `IP`
+```
+
+* `target-service`: required, used to keep the service name you want to expose with vip.
+* `target-namespace`: optional, use to set the service namespace, if not set, default is `default`.
+* `lvs-method`: optional, used to set the lvs-method in keepalived configmap, the valid options are `NAT` and `DR`. By default, if the method is not specified it will use `NAT`.
+* `vip`: optinal, you can manually set the vip, and `IP` must be routable inside the LAN and must be available. If not set, the kube-keepalived-vip will get vip from zstack, bind the vip with the service, and set vip into the configmap's `data` field.
+
+## get vip and release vip
+When a new configmap created, and the `vip` is not set in the `Data` filed, kube-keepalived-vip will require a ip from zstack. **Only** when the configmap deleted, kube-keepalived-vip will release the vip.
+
+## Communicate with ZStack
+Currently kube-keepalived-vip communicate with ZStack directly by using the RabbitMQ, so you should set the `RABBITMQ` env in the `Daemonset`, which is a list of RabbitMQ url. A single url is in format of `account:password@ip:port/virtual_host_name` or `account:password@ip:port`. Multiple urls are split by ','.
+
+
+## Watches
+
+* `configmaps`: Watch the configmaps with label `loadbalancer zstack`, then kube-keepalived-vip will bind a `vip` to the `service` which specified in the configmap, the keepalived configureation file will be updated and reloaded.
+* `endpoints`: When one pod dies or a new one is created by a scale event which associated with the `service`, then the `endpoints` will change, keepalived configuration file will be updated and reloaded.
 
 ## Example
 
@@ -57,21 +116,29 @@ service "echoheaders" created
 Next add the required annotation to expose the service using a local IP
 
 ```
-$ echo "apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: vip-configmap
-data:
-  10.4.0.50: default/echoheaders" | kubectl create -f -
+$ kubectl create -f examples/vip-configmap.yaml
 ```
+
+Configure the DaemonSet in `vip-daemonset.yaml` to use the ServiceAccount. Add the `serviceAccount` to the file as shown:
+```
+spec:
+      hostNetwork: true
+      serviceAccount: kube-keepalived-vip
+```
+
+Configure its ClusterRole. _keepalived_ needs to read the pods, nodes, endpoints, configmaps and services.
+```
+$ kubectl create -f vip-role.yaml
+```
+
 
 Now the creation of the daemonset
 ```
-$ kubectl create -f vip-daemonset.yaml
+$ kubectl create -f examples/vip-daemonset.yaml
 daemonset "kube-keepalived-vip" created
 $ kubectl get daemonset
-NAME                  CONTAINER(S)          IMAGE(S)                         SELECTOR                        NODE-SELECTOR
-kube-keepalived-vip   kube-keepalived-vip   aledbf/kube-keepalived-vip:0.15   name in (kube-keepalived-vip)   type=worker
+NAME                  DESIRED   CURRENT   READY     UP-TO-DATE   AVAILABLE   NODE-SELECTOR   AGE
+kube-keepalived-vip   2         2         2         2            2           type=worker     10d
 ```
 
 **Note: the daemonset yaml file contains a node selector. This is not required, is just an example to show how is possible to limit the nodes where keepalived can run**
@@ -92,6 +159,27 @@ echoheaders-co4g4           1/1       Running   0          5m
 kube-keepalived-vip-a90bt   1/1       Running   0          53s
 kube-keepalived-vip-g3nku   1/1       Running   0          52s
 kube-keepalived-vip-gd18l   1/1       Running   0          54s
+```
+
+Onece the kube-keepalived-vip pod run, you can get the **vip** generated by the loadbalancer controller from the configmap.
+```
+$ kubectl get configmap vip-configmap -o yaml
+apiVersion: v1
+data:
+  lvs-method: NAT
+  target-namespace: default
+  target-service: echoheaders
+  vip: 10.10.40.44
+kind: ConfigMap
+metadata:
+  creationTimestamp: 2017-12-07T08:42:01Z
+  labels:
+    loadbalancer: zstack
+  name: vip-test
+  namespace: default
+  resourceVersion: "5941043"
+  selfLink: /api/v1/namespaces/default/configmaps/vip-test
+  uid: 7e7d24bf-db2a-11e7-909b-525400e717a6
 ```
 
 ```
@@ -302,76 +390,11 @@ virtual_server 10.4.0.50 80 {
 }
 ```
 
-## PROXY Protocol mode
-
-The [PROXY Protocol](http://haproxy.1wt.eu/download/1.6/doc/proxy-protocol.txt) allows the transport connection information such as a client's address across multiple layers of NAT or TCP. Usually this is information is lost, containing information about the last hop.
-There is only one caveat using this protocol: the destination must "understand" the protocol. Without this is not possible to read the traffic.
-To enable this feature the flag `--proxy-protocol-mode=true` is required.
-
-**Using this flag implies that HAProxy will be responsible of handling the load balancing in TCP mode**
-
-[HAProxy](http://haproxy.1wt.eu) is used to in conjunction win Keepalived so send proxy packets.
-
-
-Example:
-
-First create a configmap with the VIP mapping
-```
-echo "apiVersion: v1
-data:
-  10.4.0.50: default/nginx-ingress-lb:PROXY
-  10.4.0.51: default/echoheaders
-kind: ConfigMap
-metadata:
-  name: vip-configmap
-  namespace: default" | kubectl create -f -
-```
-
-Where `default/nginx-ingress-lb` is a [NGINX Ingress controller](https://github.com/kubernetes/contrib/tree/master/ingress/controllers/nginx) with the option `use-proxy-protocol:true`.
-
-The Ingress controller just have one rule using the [echoheaders]() container.
-```
-old-mbp:~ aledbf$ kubectl get ing
-NAME             RULE          BACKEND   ADDRESS         AGE
-default-server   -                       10.4.0.5        1d
-
-                 /             echoheaders-x:80
-```
+## Building
 
 ```
-kubectl create -f vip-daemonser-proxy.xml
+$ make controller
 ```
-
-Finally test the content of the header `x-forwarded-for` to verify it returns the IP address of the client
-
-```
-$ curl -v http://10.4.0.50
-curl 10.4.0.50
-CLIENT VALUES:
-client_address=10.2.0.186
-command=GET
-real path=/
-query=nil
-request_version=1.1
-request_uri=http://10.4.0.50:8080/
-
-SERVER VALUES:
-server_version=nginx: 1.9.7 - lua: 9019
-
-HEADERS RECEIVED:
-accept=*/*
-connection=close
-host=10.4.0.50
-user-agent=curl/7.43.0
-x-forwarded-for=10.4.0.148
-x-forwarded-host=10.4.0.50
-x-forwarded-port=80
-x-forwarded-proto=http
-x-real-ip=10.4.0.148
-BODY:
--no body in request-
-```
-
 
 ## Related projects
 

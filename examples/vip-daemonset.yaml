@@ -11,7 +11,7 @@ spec:
       serviceAccountName: keepalived-vip
       hostNetwork: true
       containers:
-        - image: 10.10.20.3:5000/ylf/kube-keepalived-vip:0.23
+        - image: 10.10.20.3:5000/ylf/kube-keepalived-vip:0.1
           name: kube-keepalived-vip
           imagePullPolicy: Always
           securityContext:
@@ -24,6 +24,8 @@ spec:
               name: dev
           # use downward API
           env:
+            - name: RABBITMQ
+              value: "zstack:zstack.password@10.10.40.2"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -35,10 +37,12 @@ spec:
           # to use unicast
           command: ["/kube-keepalived-vip"]
           args:
-          - --services-configmap=default/vip-configmap
           # unicast uses the ip of the nodes instead of multicast
           # this is useful if running in cloud providers (like AWS)
           #- --use-unicast=true
+          #
+          #label-value: watch all the configmaps with label: loadbalancer = `label-value`
+          - --loadbalancer=zstack
       volumes:
         - name: modules
           hostPath:
