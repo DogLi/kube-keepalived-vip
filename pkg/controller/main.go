@@ -17,19 +17,19 @@ limitations under the License.
 package controller
 
 import (
+	"os"
 	"reflect"
-	//"sort"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
 
 	apiv1 "k8s.io/api/core/v1"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
+	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -46,7 +46,11 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
-	"os"
+
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/tools/record"
 )
 
 const (
@@ -114,12 +118,16 @@ type ipvsControllerController struct {
 
 	epController  cache.Controller
 	mapController cache.Controller
-	svcController cache.Controller
+	// control the added configmap, only one kube-keepalive-vip can use it with leader election
+	mapAddController cache.Controller
+	svcController    cache.Controller
 
 	svcLister store.ServiceLister
 	epLister  store.EndpointLister
-	//mapLister store.ConfigMapLister
+	// indexer used to get the configmap
 	indexer cache.Indexer
+	// indexer used to get the added configmap
+	indexerAdd cache.Indexer
 
 	reloadRateLimiter flowcontrol.RateLimiter
 	keepalived        *keepalived
@@ -136,6 +144,7 @@ type ipvsControllerController struct {
 
 	endpointSyncQueue  *task.Queue
 	configmapSyncQueue *task.Queue
+	configmapAddQueue  *task.Queue
 
 	stopCh chan struct{}
 }
@@ -147,7 +156,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 		reloadRateLimiter: flowcontrol.NewTokenBucketRateLimiter(0.5, 1),
 		stopCh:            make(chan struct{}),
 	}
-	namespace :=  apiv1.NamespaceAll
+	namespace := apiv1.NamespaceAll
 	podInfo, err := k8s.GetPodDetails(kubeClient)
 	if err != nil {
 		glog.Fatalf("Error getting POD information: %v", err)
@@ -184,10 +193,11 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 		ipt:        iptInterface,
 		vrid:       vrid,
 		proxyMode:  proxyMode,
-		Services: make(map[string]string),
+		Services:   make(map[string]string),
 	}
 
 	ipvsc.configmapSyncQueue = task.NewTaskQueue(ipvsc.syncConfigmap)
+	ipvsc.configmapAddQueue = task.NewTaskQueue(ipvsc.AddConfigmap)
 	ipvsc.endpointSyncQueue = task.NewTaskQueue(ipvsc.sync)
 
 	err = ipvsc.keepalived.loadTemplates()
@@ -196,10 +206,6 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 	}
 
 	mapEventHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc: func(obj interface{}) {
-			glog.Info("add configmap")
-			ipvsc.configmapSyncQueue.Enqueue(obj)
-		},
 		DeleteFunc: func(obj interface{}) {
 			glog.Info("delete configmap")
 			ipvsc.configmapSyncQueue.Enqueue(obj)
@@ -208,6 +214,13 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 			if !reflect.DeepEqual(old, cur) {
 				ipvsc.OnUpdateConfigmap(old, cur)
 			}
+		},
+	}
+
+	mapAddHandler := cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			glog.Info("add configmap")
+			ipvsc.configmapAddQueue.Enqueue(obj)
 		},
 	}
 
@@ -239,6 +252,13 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 			WatchFunc: configMapWatchFunc(kubeClient, namespace, configmapLabel),
 		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapEventHandler, cache.Indexers{})
+
+	ipvsc.indexerAdd, ipvsc.mapAddController = cache.NewIndexerInformer(
+		&cache.ListWatch{
+			ListFunc:  configMapListFunc(kubeClient, namespace, configmapLabel),
+			WatchFunc: configMapWatchFunc(kubeClient, namespace, configmapLabel),
+		},
+		&apiv1.ConfigMap{}, resyncPeriod, mapAddHandler, cache.Indexers{})
 
 	urlString := os.Getenv("RABBITMQ")
 	zstack := NewZstack(urlString)
@@ -289,8 +309,43 @@ func (ipvsc *ipvsControllerController) Start() {
 	glog.Info("starting keepalived to announce VIPs")
 	err := ipvsc.freshKeepalivedConf()
 	if err == nil {
-		ipvsc.keepalived.Start()
+		go ipvsc.keepalived.Start()
 	}
+
+
+	// leader election for the configmap add event
+	run := func(stop <-chan struct{}) {
+		glog.Infof("XXXXXXXXXXXXXXXXXX: %+v", ipvsc.configmapAddQueue)
+		go ipvsc.mapAddController.Run(ipvsc.stopCh)
+		go ipvsc.configmapAddQueue.Run(time.Second, ipvsc.stopCh)
+		glog.Infof("XXXXXXXXXXXXXXXXXXXXXxx leader election success!")
+	}
+
+	podName := os.Getenv("POD_NAME")
+	namespace := os.Getenv("POD_NAMESPACE")
+	rl, err := resourcelock.New(
+		resourcelock.EndpointsResourceLock,
+		namespace,
+		"kube-keepalived-vip",
+		ipvsc.client.CoreV1(),
+		resourcelock.ResourceLockConfig{
+			Identity:      podName,
+			EventRecorder: createRecorder(ipvsc.client, podName, namespace),
+		},
+	)
+
+	leaderelection.RunOrDie(leaderelection.LeaderElectionConfig{
+		Lock:          rl,
+		LeaseDuration: 15 * time.Second,
+		RenewDeadline: 10 * time.Second,
+		RetryPeriod:   2 * time.Second,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: run,
+			OnStoppedLeading: func() {
+				glog.Fatalf("XXXXXXXXXXXXXXXXXXXXX leader election lost!")
+			},
+		},
+	})
 }
 
 // Stop stops the loadbalancer controller.
@@ -314,7 +369,6 @@ func (ipvsc *ipvsControllerController) Stop() error {
 	return err
 }
 
-
 func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
 	indexes := []string{constants.TargetService, constants.BindIP, constants.LvsMethod}
 	for _, index := range indexes {
@@ -323,4 +377,11 @@ func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
 		}
 	}
 	return true
+}
+
+func createRecorder(kubecli kubernetes.Interface, name, namespace string) record.EventRecorder {
+	eventBroadcaster := record.NewBroadcaster()
+	eventBroadcaster.StartLogging(glog.Infof)
+	eventBroadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: corev1.New(kubecli.Core().RESTClient()).Events(namespace)})
+	return eventBroadcaster.NewRecorder(scheme.Scheme, apiv1.EventSource{Component: name})
 }

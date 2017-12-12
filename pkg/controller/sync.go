@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"sort"
 	"syscall"
-	"k8s.io/kubernetes/staging/src/k8s.io/apimachinery/pkg/api/errors"
 )
 
 func (ipvsc *ipvsControllerController) getConfigMap(ns, name string) (*apiv1.ConfigMap, error) {
@@ -224,23 +223,10 @@ func (ipvsc *ipvsControllerController) OnAddConfigmap(cfm *apiv1.ConfigMap) erro
 
 	cfm = cfm.DeepCopy()
 
-	// check if the vip is set by other keepalived
-	curConfigmap, err := ipvsc.getConfigMap(cfm.GetNamespace(), cfm.GetName())
-	if err != nil && !errors.IsNotFound(err) {
-		return err
-	}
-	ipvsc.indexer.Resync()
-	_, curOk := curConfigmap.Data[constants.BindIP]
-	_, oldOk := cfm.Data[constants.BindIP]
-	if !oldOk && curOk {
-		glog.Info("VIP is set by others!")
-		return nil
-	} else {
-		glog.Info("configmap is not set VIP, so I'll set it!")
-	}
 
+	_, ok := cfm.Data[constants.BindIP]
 	// add configmap without bind ip
-	if !oldOk {
+	if !ok {
 		// name & namespace
 		targetService := cfm.Data[constants.TargetService]
 		targetNamespace, ok := cfm.Data[constants.TargetNamespace]
@@ -292,23 +278,30 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 	defer configMapMutex.Unlock()
 	oldCM := old.(*apiv1.ConfigMap)
 	curCM := cur.(*apiv1.ConfigMap)
-	if configmapsEqual(oldCM, curCM) {
-		glog.Infof("update configmap, old configmap and current configmap are equal")
+
+	glog.Infof("update configmap, old configmap data: %v, current configmap data: %v", oldCM.Data, curCM.Data)
+
+	// we should not change the target service
+	if curCM.Data[constants.TargetService] != oldCM.Data[constants.TargetService] || curCM.Data["constants.TargetNamespace"] != oldCM.Data["constants.TargetNamespace"] {
+		glog.Errorf("you are trying to change the target service or target service namespace, forbidden!")
+		curCM.Data = oldCM.Data
+		ipvsc.client.ConfigMaps(curCM.GetNamespace()).Update(curCM)
 		return nil
 	}
-	glog.Infof("update configmap, old configmap data: %v, current configmap data: %v", oldCM.Data, curCM.Data)
 
 	old_bind_ip, ok := oldCM.Data[constants.BindIP]
 	if !ok {
 		// if the oldCM does'nt have bind_ip and current bind_ip has bind_ip, update it
-		ipvsc.configmapSyncQueue.Enqueue(cur)
-		return nil
+		if err := ipvsc.freshKeepalivedConf(); err != nil {
+			return err
+		} else {
+			return ipvsc.reload()
+		}
 	} else {
 		cur_bind_ip, ok := curCM.Data[constants.BindIP]
 		if ok {
 			// if we want to update the existed bind_ip,
-			// delete it from keepalived and
-			// return release the old bind ip
+			// delete it from keepalived and release the old bind ip
 			// and put the new configmap into the queue
 			if old_bind_ip != cur_bind_ip {
 				err := ipvsc.keepalived.DeleteVIP(old_bind_ip)
@@ -322,9 +315,14 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 				// release old_bind_ip
 				ipvsc.configmapSyncQueue.Enqueue(cur)
 				return nil
+			}else {
+				if err := ipvsc.freshKeepalivedConf(); err != nil {
+					return err
+				} else {
+					return ipvsc.reload()
+				}
 			}
-		} else {
-			// we should not delete the old bind_ip
+		} else {  // someone delete the bind_ip
 			curCM.Data[constants.BindIP] = old_bind_ip
 			newCM, err := ipvsc.client.ConfigMaps(curCM.GetNamespace()).Update(curCM)
 			if err != nil {
@@ -333,12 +331,7 @@ func (ipvsc *ipvsControllerController) OnUpdateConfigmap(old, cur interface{}) e
 			return fmt.Errorf("you delete the bind_ip: %s", old_bind_ip)
 		}
 
-		// we should not change the target service
-		if curCM.Data[constants.TargetService] != oldCM.Data[constants.TargetService] || curCM.Data["constants.TargetNamespace"] != oldCM.Data["constants.TargetNamespace"] {
-			glog.Errorf("you are trying to change the target service or target service namespace, forbidden!")
-			curCM.Data = oldCM.Data
-			ipvsc.client.ConfigMaps(curCM.GetNamespace()).Update(curCM)
-		}
+
 	}
 	return nil
 }
@@ -409,6 +402,23 @@ func (ipvsc *ipvsControllerController) syncConfigmap(oldobj interface{}) error {
 			err = ipvsc.OnDeleteConfigmap(oldCM)
 		}
 		return err
+	}
+	return nil
+}
+
+func (ipvsc *ipvsControllerController) AddConfigmap(oldobj interface{}) error {
+
+	ipvsc.reloadRateLimiter.Accept()
+
+	oldCM := oldobj.(*apiv1.ConfigMap)
+	cmName := oldCM.GetObjectMeta().GetName()
+	cmNamespace := oldCM.GetObjectMeta().GetNamespace()
+	cmData := oldCM.Data
+	_, err := ipvsc.getConfigMap(cmNamespace, cmName)
+	glog.Infof("in sync configmap %s, data: %s", oldCM.Name, cmData)
+	// on delete configmap
+	if err != nil {
+		return nil
 	}
 
 	// on create configmap

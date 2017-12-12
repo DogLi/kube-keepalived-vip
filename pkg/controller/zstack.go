@@ -36,6 +36,7 @@ func (self *ZStack) BuildData() amqp.Publishing {
 }
 
 func (ipvsc *ipvsControllerController) AcquireVip() (string, error) {
+	return "10.10.40.44", nil
 	msgId := newUuid()
 	localIp := ipvsc.keepalived.ip
 	localMask := ipvsc.keepalived.netmask
@@ -82,7 +83,9 @@ func (ipvsc *ipvsControllerController) ReleaseVip(vip string) error {
 "type": "ReleaseIP"
 }
 }`, ipvsc.zstack.replyQueueName, msgId, ipvsc.zstack.session.token, msgId, vip)
-	ipvsc.zstack.UpdateSession()
+	if err := ipvsc.zstack.UpdateSession(); err != nil {
+		return err
+	}
 	msg := ipvsc.zstack.encodeMessage(msgId, jsonStr)
 	jsonResult, err := ipvsc.zstack.SendMsg(msg)
 	if err != nil{
@@ -254,6 +257,10 @@ func (self *ZStack) createQueue() error {
 }
 
 func (self *ZStack) SendMsg(msg amqp.Publishing) (*simplejson.Json, error) {
+	if self.conn == nil {
+		err := fmt.Errorf("can not connect to zstack rabbitmq")
+		return &simplejson.Json{}, err
+	}
 	channel, err := self.conn.Channel()
 	if err != nil {
 		glog.Errorf("get channel failed: %s", err)
