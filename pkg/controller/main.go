@@ -315,13 +315,12 @@ func (ipvsc *ipvsControllerController) Start() {
 
 	// leader election for the configmap add event
 	run := func(stop <-chan struct{}) {
-		glog.Infof("XXXXXXXXXXXXXXXXXX: %+v", ipvsc.configmapAddQueue)
 		go ipvsc.mapAddController.Run(ipvsc.stopCh)
 		go ipvsc.configmapAddQueue.Run(time.Second, ipvsc.stopCh)
-		glog.Infof("XXXXXXXXXXXXXXXXXXXXXxx leader election success!")
+		glog.Infof("leader election success!")
 	}
 
-	podName := os.Getenv("POD_NAME")
+	hostName := os.Getenv("HOSTNAME")
 	namespace := os.Getenv("POD_NAMESPACE")
 	rl, err := resourcelock.New(
 		resourcelock.EndpointsResourceLock,
@@ -329,8 +328,8 @@ func (ipvsc *ipvsControllerController) Start() {
 		"kube-keepalived-vip",
 		ipvsc.client.CoreV1(),
 		resourcelock.ResourceLockConfig{
-			Identity:      podName,
-			EventRecorder: createRecorder(ipvsc.client, podName, namespace),
+			Identity:      hostName,
+			EventRecorder: createRecorder(ipvsc.client, hostName, namespace),
 		},
 	)
 
@@ -342,7 +341,7 @@ func (ipvsc *ipvsControllerController) Start() {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: run,
 			OnStoppedLeading: func() {
-				glog.Fatalf("XXXXXXXXXXXXXXXXXXXXX leader election lost!")
+				glog.Fatalf("leader election lost!")
 			},
 		},
 	})
