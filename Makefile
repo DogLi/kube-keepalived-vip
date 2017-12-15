@@ -15,14 +15,7 @@ controller: clean
 	-o rootfs/kube-keepalived-vip \
 	-s ${PKG}/pkg/cmd
 
-.PHONY: build
-build:
-	sudo docker run -it \
-	-v /root/kube-keepalived-vip\:/root/database-operator/src/github.com/aledbf/kube-keepalived-vip \
-    10.10.20.3\:5000/ylf/golang \
-    /bin/bash -c "cd /root/database-operator/src/github.com/aledbf/kube-keepalived-vip && make controller"
-
-container:
+container: controller
 	sudo chmod +x rootfs/kube-keepalived-vip
 	sudo docker build -t $(PREFIX):$(TAG) rootfs
 

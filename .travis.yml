@@ -11,7 +11,7 @@ notifications:
 go:
   - 1.9
 
-go_import_path: github.com/aledbf/kube-keepalived-vip
+go_import_path: github.com/dogli/kube-keepalived-vip
 
 env:
   global:

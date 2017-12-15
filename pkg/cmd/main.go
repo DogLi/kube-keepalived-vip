@@ -31,7 +31,7 @@ import (
 	"k8s.io/kubernetes/pkg/util/sysctl"
 	k8sexec "k8s.io/utils/exec"
 
-	"github.com/aledbf/kube-keepalived-vip/pkg/controller"
+	"github.com/dogli/kube-keepalived-vip/pkg/controller"
 )
 
 var (
@@ -77,7 +77,7 @@ func init() {
       RFC-5798), which must be different for every Virtual Router (ie. every
       keepalived sets) running on the same network.`)
 
-	flag.StringVar(&configmapLabel, "loadbalancer", "zstack", "watch the configmap with label loadbalancer: balancer-platform")
+	flag.StringVar(&configmapLabel, "loadbalancer", "barematel", "watch the configmap with label loadbalancer: balancer-platform")
 
 	flag.BoolVar(&showVersion, "show-version", false,
 		`show the version`)

@@ -1,3 +1,39 @@
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: keepalived-vip
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - services
+  - endpoints
+  - pods
+  - configmaps
+  verbs: ["get", "list", "watch", "update"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keepalived-vip
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: keepalived-vip
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keepalived-vip
+subjects:
+- kind: ServiceAccount
+  name: keepalived-vip
+  namespace: default
+---
+
 apiVersion: extensions/v1beta1
 kind: DaemonSet
 metadata:
@@ -24,8 +60,6 @@ spec:
               name: dev
           # use downward API
           env:
-            - name: RABBITMQ
-              value: "zstack:zstack.password@10.10.40.2"
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -42,7 +76,7 @@ spec:
           #- --use-unicast=true
           #
           #label-value: watch all the configmaps with label: loadbalancer = `label-value`
-          - --loadbalancer=zstack
+          - --loadbalancer=baremetal
       volumes:
         - name: modules
           hostPath:

@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 
-	"github.com/aledbf/kube-keepalived-vip/pkg/k8s"
+	"github.com/dogli/kube-keepalived-vip/pkg/k8s"
 )
 
 var (

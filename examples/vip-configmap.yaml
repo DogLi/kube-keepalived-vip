@@ -3,9 +3,10 @@ kind: ConfigMap
 data:
   target-namespace: default
   target-service: echoheaders
+  vip: 10.10.40.44
 metadata:
   labels:
-    loadbalancer: zstack
-  name: vip-test
+    loadbalancer: barematel
+  name: vip-echoserver
   namespace: default
 

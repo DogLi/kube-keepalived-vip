@@ -37,12 +37,11 @@ import (
 	utilexec "k8s.io/kubernetes/pkg/util/exec"
 	utiliptables "k8s.io/kubernetes/pkg/util/iptables"
 
-	"github.com/aledbf/kube-keepalived-vip/pkg/k8s"
-	"github.com/aledbf/kube-keepalived-vip/pkg/store"
-	"github.com/aledbf/kube-keepalived-vip/pkg/task"
-	//"github.com/aledbf/kube-keepalived-vip/utils"
+	"github.com/dogli/kube-keepalived-vip/pkg/k8s"
+	"github.com/dogli/kube-keepalived-vip/pkg/store"
+	"github.com/dogli/kube-keepalived-vip/pkg/task"
+	//"github.com/dogli/kube-keepalived-vip/utils"
 	"fmt"
-	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -131,7 +130,6 @@ type ipvsControllerController struct {
 
 	reloadRateLimiter flowcontrol.RateLimiter
 	keepalived        *keepalived
-	zstack            *ZStack
 
 	ruMD5 string
 
@@ -162,7 +160,7 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 		glog.Fatalf("Error getting POD information: %v", err)
 	}
 
-	pod, err := kubeClient.Pods(podInfo.Namespace).Get(podInfo.Name, metav1.GetOptions{})
+	pod, err := kubeClient.CoreV1().Pods(podInfo.Namespace).Get(podInfo.Name, metav1.GetOptions{})
 
 	if err != nil {
 		glog.Fatalf("Error getting %v: %v", podInfo.Name, err)
@@ -260,24 +258,20 @@ func NewIPVSController(kubeClient *kubernetes.Clientset, useUnicast bool, config
 		},
 		&apiv1.ConfigMap{}, resyncPeriod, mapAddHandler, cache.Indexers{})
 
-	urlString := os.Getenv("RABBITMQ")
-	zstack := NewZstack(urlString)
-	ipvsc.zstack = zstack
-	zstack.Connect()
 	return &ipvsc, nil
 }
 
 func configMapListFunc(c *kubernetes.Clientset, ns string, labelValue string) func(metav1.ListOptions) (runtime.Object, error) {
 	return func(options metav1.ListOptions) (runtime.Object, error) {
 		options.LabelSelector = labels.Set{"loadbalancer": labelValue}.AsSelector().String()
-		return c.ConfigMaps(ns).List(options)
+		return c.CoreV1().ConfigMaps(ns).List(options)
 	}
 }
 
 func configMapWatchFunc(c *kubernetes.Clientset, ns string, labelValue string) func(options metav1.ListOptions) (watch.Interface, error) {
 	return func(options metav1.ListOptions) (watch.Interface, error) {
 		options.LabelSelector = labels.Set{"loadbalancer": labelValue}.AsSelector().String()
-		return c.ConfigMaps(ns).Watch(options)
+		return c.CoreV1().ConfigMaps(ns).Watch(options)
 	}
 }
 
@@ -292,6 +286,7 @@ func (ipvsc *ipvsControllerController) Start() {
 
 	go handleSigterm(ipvsc)
 
+
 	// Wait for all involved caches to be synced, before processing items from the queue is started
 	if !cache.WaitForCacheSync(ipvsc.stopCh,
 		ipvsc.epController.HasSynced,
@@ -301,17 +296,11 @@ func (ipvsc *ipvsControllerController) Start() {
 		k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 	}
 
-	//if !cache.WaitForCacheSync(ipvsc.stopCfgCh,
-	//) {
-	//	k8sruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
-	//}
-
 	glog.Info("starting keepalived to announce VIPs")
 	err := ipvsc.freshKeepalivedConf()
 	if err == nil {
 		go ipvsc.keepalived.Start()
 	}
-
 
 	// leader election for the configmap add event
 	run := func(stop <-chan struct{}) {
@@ -320,7 +309,7 @@ func (ipvsc *ipvsControllerController) Start() {
 		glog.Infof("leader election success!")
 	}
 
-	hostName := os.Getenv("HOSTNAME")
+	podName := os.Getenv("POD_NAME")
 	namespace := os.Getenv("POD_NAMESPACE")
 	rl, err := resourcelock.New(
 		resourcelock.EndpointsResourceLock,
@@ -328,8 +317,8 @@ func (ipvsc *ipvsControllerController) Start() {
 		"kube-keepalived-vip",
 		ipvsc.client.CoreV1(),
 		resourcelock.ResourceLockConfig{
-			Identity:      hostName,
-			EventRecorder: createRecorder(ipvsc.client, hostName, namespace),
+			Identity:      podName,
+			EventRecorder: createRecorder(ipvsc.client, podName, namespace),
 		},
 	)
 
@@ -363,20 +352,10 @@ func (ipvsc *ipvsControllerController) Stop() error {
 		glog.Infof("shutting down controller configmap sysnc queues")
 		go ipvsc.configmapSyncQueue.Shutdown()
 	}
-	ipvsc.zstack.Close()
 	err := ipvsc.keepalived.Stop()
 	return err
 }
 
-func configmapsEqual(CM1, CM2 *apiv1.ConfigMap) bool {
-	indexes := []string{constants.TargetService, constants.BindIP, constants.LvsMethod}
-	for _, index := range indexes {
-		if CM1.Data[index] != CM2.Data[index] {
-			return false
-		}
-	}
-	return true
-}
 
 func createRecorder(kubecli kubernetes.Interface, name, namespace string) record.EventRecorder {
 	eventBroadcaster := record.NewBroadcaster()

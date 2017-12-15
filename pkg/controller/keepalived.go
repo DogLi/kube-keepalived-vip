@@ -28,7 +28,7 @@ import (
 	"github.com/golang/glog"
 
 	"bytes"
-	"github.com/aledbf/kube-keepalived-vip/pkg/constants"
+	"github.com/dogli/kube-keepalived-vip/pkg/constants"
 	"k8s.io/kubernetes/pkg/util/iptables"
 	k8sexec "k8s.io/utils/exec"
 	"sort"
